@@ -24,7 +24,7 @@ export async function exportProfile(ctx){
   await assertRepositoryReady(ctx.root);
   const old=await jsonOrNull(await safeFile(ctx.root,'profile.json'));
   const loaded=old?await loadProfile(ctx.root):null;
-  const rows=await ctx.adapter.list();
+  const rows=(await ctx.adapter.list()).filter(row=>row.id!=='paseo-sync'&&row.id!==ctx.selfId);
   const plugins=rows.map(snapshotPlugin).sort((a,b)=>a.id.localeCompare(b.id));
   for(const row of rows){
     if(row.installation?.identity.kind==='git' && row.path && await git(row.path,'status','--porcelain','--untracked-files=no'))throw new Error(`Git plugin has local source changes: ${row.id}. Commit a portable source revision first.`);

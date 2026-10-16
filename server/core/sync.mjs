@@ -41,6 +41,13 @@ function comparable(s) {
   return {pluginsEnabled:s.pluginsEnabled,plugins:Object.fromEntries(Object.entries(s.plugins).map(([k,v])=>[k,v?{descriptor:pluginIdentity(v.descriptor),status:v.status}:null])),settings:s.settings,patches:s.patches};
 }
 async function baseline(ctx) {return jsonOrNull(await safeFile(ctx.state,'baseline.json'));}
+function transitionConflict(now,target,selfId='paseo-sync') {
+  if(target.id===selfId || target.id==='paseo-sync')return `Self management is excluded: ${target.id}. Update this controller separately.`;
+  if(!now)return !target.enabled?`Cannot install disabled target ${target.id}: Paseo install immediately enables code.`:null;
+  if(now.source!==target.source || (now.pluginPath??'.')!==(target.pluginPath??'.'))return `Source change requires a separate migration: ${target.id}`;
+  if(now.revision!==target.revision && now.registry)return `Exact registry version transition is not supported: ${target.id}. Review registry provenance separately; no reinstall will be attempted.`;
+  return null;
+}
 async function planData(ctx) {
   await privateRoot(ctx.state);
   const profile=await loadProfile(ctx.root),current=await capture(ctx,profile),previous=await baseline(ctx);
@@ -54,8 +61,8 @@ async function planData(ctx) {
     const actions=[];
     const sameVersion=now && same({...pluginIdentity(now),enabled:target.enabled},pluginIdentity(target));
     localConflict(target.id,pluginIdentity(now),previous?.plugins?.[target.id]===undefined?undefined:pluginIdentity(previous.plugins[target.id]),pluginIdentity(target));
-    if(!sameVersion)actions.push('install');
-    if(!sameVersion&&!target.enabled)conflicts.push(`Cannot install disabled target ${target.id}: Paseo install immediately enables code. Review installation separately; this tool will not briefly activate it.`);
+    const blocked=transitionConflict(now,target,ctx.selfId);if(blocked)conflicts.push(blocked);
+    if(!sameVersion)actions.push(now?'update':'install');
     const bundle=profile.patches.find(x=>x.plugin===target.id);
     if(bundle){
       let needsPatch=!sameVersion;
@@ -101,7 +108,7 @@ export async function verify(ctx) {
 async function backupFile(ctx,id){if(!/^[a-f0-9-]{36}$/.test(id))throw new Error('Invalid backup ID');return safeFile(ctx.state,`backups/${id}.json`);}
 export async function applyPlan(ctx,approval) {
   await privateRoot(ctx.state);
-  const lock=await safeFile(ctx.state,'operation.lock');
+  const lock=await safeFile(ctx.lockRoot??ctx.state,'operation.lock');
   try{await mkdir(lock);}catch(e){if(e.code==='EEXIST')throw new Error(`Another operation is active, or a stale lock needs review: ${lock}`);throw e;}
   let backup=null,filename=null;
   try{
@@ -123,6 +130,7 @@ export async function applyPlan(ctx,approval) {
         const row=(await ctx.adapter.list()).find(x=>x.id===id);if(!row)throw new Error(`Install returned no plugin: ${id}`);
         if(row.enabled)await ctx.adapter.act('disable',id);
       }
+      if(change.actions.includes('update'))await ctx.adapter.update(target);
       const row=(await ctx.adapter.list()).find(x=>x.id===id);
       if(!row)throw new Error(`Missing plugin after install: ${id}`);
       const installed=snapshotPlugin(row);
@@ -135,7 +143,7 @@ export async function applyPlan(ctx,approval) {
       for(const s of affectedSettings){
         const file=await settingsFile(ctx,s),raw=await bytesOrNull(file);
         // Installation may recreate defaults. Preserve the original check for same-version changes.
-        if(!change.actions.includes('install') && (raw===null?null:raw.toString('base64'))!==current.settings[s.file])throw new Error(`Settings changed concurrently before write: ${s.file}`);
+        if((raw===null?null:raw.toString('base64'))!==current.settings[s.file])throw new Error(`Settings changed concurrently before write: ${s.file}`);
         if(!same(raw===null?null:JSON.parse(raw.toString('utf8')),s.data))await writeJson(file,s.data);
       }
       if(target.enabled)await ctx.adapter.act('enable',id);
@@ -160,14 +168,14 @@ export async function restorePlan(ctx,id) {
   const conflicts=[];
   for(const [plugin,before] of Object.entries(b.before.plugins)){
     const now=current.plugins[plugin];
-    if(before&&!before.descriptor.enabled&&(!now||!same({...pluginIdentity(now.descriptor),enabled:false},pluginIdentity(before.descriptor))))conflicts.push(`Cannot reinstall previously disabled plugin ${plugin}: Paseo install immediately enables code.`);
+    if(before){const conflict=transitionConflict(now?.descriptor??null,before.descriptor,ctx.selfId);if(conflict)conflicts.push(conflict);}
   }
   return {backupId:id,approval:objectHash({backup:b,current:comparable(current)}),conflicts,currentChangedSinceBackup:b.after!==null&&!same(comparable(current),comparable(b.after)),
     warnings:['Restore may reinstall previous pinned versions using the network. New plugins are disabled and retained to preserve their data.'],_backup:b,_current:current};
 }
 export async function restore(ctx,id,approval) {
   await privateRoot(ctx.state);
-  const lock=await safeFile(ctx.state,'operation.lock');try{await mkdir(lock);}catch{throw new Error('Another operation is active, or a stale lock needs review.');}
+  const lock=await safeFile(ctx.lockRoot??ctx.state,'operation.lock');try{await mkdir(lock);}catch{throw new Error('Another operation is active, or a stale lock needs review.');}
   try{
     const preview=await restorePlan(ctx,id);
     if(preview.approval!==approval)throw new Error('Restore plan is stale');
@@ -193,7 +201,7 @@ export async function restore(ctx,id,approval) {
         continue;
       }
       if(!row || !same({...pluginIdentity(snapshotPlugin(row)),enabled:before.descriptor.enabled},pluginIdentity(before.descriptor))){
-        await ctx.adapter.install(before.descriptor);row=(await ctx.adapter.list()).find(x=>x.id===target.id);if(row?.enabled)await ctx.adapter.act('disable',target.id);
+        if(row)await ctx.adapter.update(before.descriptor);else await ctx.adapter.install(before.descriptor);row=(await ctx.adapter.list()).find(x=>x.id===target.id);if(row?.enabled)await ctx.adapter.act('disable',target.id);
         await assertCurrentSettings(target.id);
       }
       for(const bundle of b.profile.patches.filter(x=>x.plugin===target.id))for(const f of bundle.data.files){

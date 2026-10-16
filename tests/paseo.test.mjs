@@ -25,3 +25,11 @@ test('requires confirmed supported daemon version',()=>{
   assert.doesNotThrow(()=>assertDaemonVersion('0.12.0'));
   for(const version of [undefined,'0.10.9','0.11.3','0.11.4-beta.1'])assert.throws(()=>assertDaemonVersion(version));
 });
+
+test('updates exact npm and Git revisions without reinstalling configured IDs',async()=>{
+  const {updateArguments}=await import('../server/core/paseo.mjs');
+  assert.equal(typeof updateArguments,'function');
+  const p={id:'demo',source:'npm:demo',revision:'1.2.3'};
+  assert.deepEqual(updateArguments(p,'/home'),['plugin','update','demo','--version','1.2.3','--home','/home','--json']);
+  assert.ok(updateArguments({...p,source:'git:https://github.com/example/demo',revision:'a'.repeat(40)},'/home').includes('--ref'));
+});

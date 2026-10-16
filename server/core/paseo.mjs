@@ -19,6 +19,9 @@ export function installArguments(p, home) {
   if (p.pluginPath && p.pluginPath !== '.') args.push('--path',p.pluginPath);
   return [...args,'--home',home,'--json'];
 }
+export function updateArguments(p, home) {
+  return ['plugin','update',p.id,p.source.startsWith('npm:')?'--version':'--ref',p.revision,'--home',home,'--json'];
+}
 export function parseJsonOutput(stdout) {
   const value = JSON.parse(stdout.trim());
   if (value?.error) throw new Error(`Paseo ${value.error.code ?? 'ERROR'}: ${value.error.message ?? 'request failed'}`);
@@ -73,5 +76,6 @@ export async function makeAdapter(home, explicit) {
     async list() { const rows=await call(['plugin','ls','--home',home,'--json']); if(!Array.isArray(rows)) throw new Error('Unexpected plugin list response');return rows; },
     act: (action,id) => call(['plugin',action,id,'--home',home,'--json']),
     install: p => call(installArguments(p,home)),
+    update: p => call(updateArguments(p,home)),
   };
 }

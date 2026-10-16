@@ -24,6 +24,7 @@ async function fixture(t, { installed = false, patch = false } = {}) {
   await writeJson(path.join(root,'profile.json'),manifest);
   let rows=[]; const calls=[];
   async function install(p){
+    if(rows.some(x=>x.id===p.id))throw new Error('Plugin ID already configured');
     calls.push(['install',p.id,p.revision]);
     const dir=path.join(home,'plugins',p.id,p.revision);await mkdir(dir,{recursive:true});
     await writeFile(path.join(dir,'index.client.tsx'),'icon="Github"');
@@ -32,6 +33,7 @@ async function fixture(t, { installed = false, patch = false } = {}) {
   }
   const adapter={
     async list(){return structuredClone(rows);},install,
+    async update(p){calls.push(['update',p.id,p.revision]);const old=rows.find(x=>x.id===p.id);assert.ok(old);const enabled=old.enabled;rows=rows.filter(x=>x.id!==p.id);await install(p);rows.find(x=>x.id===p.id).enabled=enabled;rows.find(x=>x.id===p.id).status=enabled?'running':'disabled';},
     async act(action,id){calls.push([action,id]);const row=rows.find(x=>x.id===id);assert.ok(row);if(action==='disable'){row.enabled=false;row.status='disabled';}if(action==='enable'||action==='reload'){row.enabled=true;row.status='running';}},
   };
   if(installed)await install(plugin);
@@ -131,10 +133,29 @@ test('does not install a disabled target because Paseo install starts plugins im
   await assert.rejects(applyPlan(f.ctx,p.approval));assert.deepEqual(f.calls,[]);
 });
 
-test('restore also refuses a reinstall that would briefly activate a previously disabled plugin',async t=>{
+test('updates installed npm versions in both directions and restores a previously disabled version',async t=>{
   const f=await fixture(t,{installed:true});await f.adapter.act('disable','better-paseo');
   f.manifest.plugins[0].revision='2.0.0';await writeJson(path.join(f.root,'profile.json'),f.manifest);
-  const p=await buildPlan(f.ctx),result=await applyPlan(f.ctx,p.approval);
-  const preview=await restorePlan(f.ctx,result.backupId);assert.ok(preview.conflicts.length);
-  f.calls.length=0;await assert.rejects(restore(f.ctx,result.backupId,preview.approval),/disabled/i);assert.deepEqual(f.calls,[]);
+  let p=await buildPlan(f.ctx);assert.ok(p.changes[0].actions.includes('update'));
+  const result=await applyPlan(f.ctx,p.approval);
+  assert.ok(f.calls.some(x=>x[0]==='update'&&x[2]==='2.0.0'));
+  const preview=await restorePlan(f.ctx,result.backupId);assert.equal(preview.conflicts.length,0);
+  await restore(f.ctx,result.backupId,preview.approval);
+  const row=(await f.adapter.list())[0];assert.equal(row.installation.currentRevision,'1.0.0');assert.equal(row.enabled,false);
+});
+
+test('blocks source changes and self management before mutation',async t=>{
+  const f=await fixture(t,{installed:true});f.manifest.plugins[0].source='npm:other';await writeJson(path.join(f.root,'profile.json'),f.manifest);
+  let p=await buildPlan(f.ctx);assert.ok(p.conflicts.some(x=>/source/i.test(x)));
+  await assert.rejects(applyPlan(f.ctx,p.approval));assert.deepEqual(f.calls,[]);
+  f.manifest.plugins=[{id:'paseo-sync',source:'npm:paseo-sync',revision:'0.1.0',enabled:true}];f.manifest.settings=[];await writeJson(path.join(f.root,'profile.json'),f.manifest);
+  p=await buildPlan(f.ctx);assert.ok(p.conflicts.some(x=>/self/i.test(x)));
+});
+
+test('registry version transitions fail visibly before stopping the plugin',async t=>{
+  const f=await fixture(t,{installed:true}),list=f.adapter.list;
+  f.adapter.list=async()=>{const rows=await list();rows[0].installation.identity.registry={url:'https://plugins.paseo.sh',id:'example/demo'};return rows;};
+  f.manifest.plugins[0].revision='2.0.0';await writeJson(path.join(f.root,'profile.json'),f.manifest);
+  const p=await buildPlan(f.ctx);assert.ok(p.conflicts.some(x=>/registry/i.test(x)));
+  await assert.rejects(applyPlan(f.ctx,p.approval));assert.deepEqual(f.calls,[]);
 });
