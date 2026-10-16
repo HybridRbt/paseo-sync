@@ -11,7 +11,7 @@ Paseo 原生插件，通过你自己的 Git 仓库同步插件固定版本、启
 在每台 daemon 主机执行：
 
 ```sh
-paseo plugin install git:https://github.com/HybridRbt/paseo-sync --ref v0.1.1
+paseo plugin install git:https://github.com/HybridRbt/paseo-sync --ref v0.1.2
 ```
 
 也可以克隆本仓库，然后用 `paseo plugin install <代码仓库绝对路径>` 本地开发安装。无运行时 npm 依赖或构建脚本。
@@ -41,7 +41,7 @@ paseo plugin install git:https://github.com/HybridRbt/paseo-sync --ref v0.1.1
 | npm、HTTPS Git 固定版本 | 首次安装，以及同来源的明确版本更新；执行后核验实际版本。 |
 | registry 安装的既有插件 | 相同版本可同步状态和设置；版本变化会阻止，避免绕过审核版本约束。 |
 | 来源切换 | 明确阻止，需要单独迁移，不自动卸载重装。 |
-| 禁用插件 | 可更新已存在且禁用的插件；缺失但目标禁用的插件不会被短暂启用安装。 |
+| 禁用插件 | 可更新已存在且禁用的插件；缺失且目标禁用时明确跳过，不安装、不写入其设置或补丁，也不阻塞其他插件；验证将其视为满足禁用意图。 |
 | Better Paseo | 仅 `presentation` 中审核过的字段。未知字段拒绝，不能扫整个设置目录。 |
 | 源码补丁 | Git 未记录的源码或未跟踪文件会阻止更新；只执行清单明确列出的替换，校验原始和结果 SHA256；未知文件拒绝。 |
 | Cafe | 为受管插件及控制器合并自动更新排除项，保留原字段、原排除项，单独备份和恢复。 |

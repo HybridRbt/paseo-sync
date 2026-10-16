@@ -22,6 +22,16 @@ import {
   validateSettings,
 } from "./profile.mjs";
 
+function skipMissingDisabled(ctx, current, target) {
+  return (
+    !!target &&
+    !target.enabled &&
+    !current.plugins[target.id] &&
+    target.id !== "paseo-sync" &&
+    target.id !== ctx.selfId &&
+    !ctx.selfIds?.includes(target.id)
+  );
+}
 function baseState(s) {
   return {
     plugins: Object.fromEntries(
@@ -135,7 +145,8 @@ async function planData(ctx) {
     current = await capture(ctx, profile),
     previous = await baseline(ctx);
   const conflicts = [],
-    changes = [];
+    changes = [],
+    skipped = [];
   if (!current.pluginsEnabled)
     conflicts.push(
       "pluginsEnabled is off; enable it explicitly in Paseo before applying.",
@@ -156,6 +167,10 @@ async function planData(ctx) {
     const currentPlugin = current.plugins[target.id],
       now = currentPlugin?.descriptor ?? null;
     const actions = [];
+    if (skipMissingDisabled(ctx, current, target)) {
+      skipped.push({ plugin: target.id, reason: "missing-disabled" });
+      continue;
+    }
     if (currentPlugin?.sourceState?.clean === false)
       conflicts.push(
         `Local source edits or dirty Git HEAD prevent synchronization: ${target.id}`,
@@ -250,6 +265,7 @@ async function planData(ctx) {
     approval,
     preferProfile: !!ctx.preferProfile,
     changes,
+    skipped,
     conflicts,
     warnings: [
       "Plugin state here is daemon state; verify client UI after first install.",
@@ -276,6 +292,7 @@ export async function captureBaseline(ctx, profile) {
     throw new Error("Local source changed while preparing publish");
   for (const p of profile.manifest.plugins)
     if (
+      !skipMissingDisabled(ctx, current, p) &&
       !same(
         pluginIdentity(current.plugins[p.id]?.descriptor),
         pluginIdentity(p),
@@ -283,10 +300,23 @@ export async function captureBaseline(ctx, profile) {
     )
       throw new Error("Local plugin state changed while preparing publish");
   for (const setting of profile.settings)
-    if (!same(parsed(current.settings[setting.file]), setting.data))
+    if (
+      !skipMissingDisabled(
+        ctx,
+        current,
+        profile.manifest.plugins.find((p) => p.id === setting.plugin),
+      ) &&
+      !same(parsed(current.settings[setting.file]), setting.data)
+    )
       throw new Error("Local settings changed while preparing publish");
   for (const bundle of profile.patches)
-    for (const f of bundle.data.files) {
+    for (const f of skipMissingDisabled(
+      ctx,
+      current,
+      profile.manifest.plugins.find((p) => p.id === bundle.plugin),
+    )
+      ? []
+      : bundle.data.files) {
       const raw = current.patches[`${bundle.plugin}/${f.path}`];
       if (raw === null || digest(Buffer.from(raw, "base64")) !== f.afterSha256)
         throw new Error("Local source patch changed while preparing publish");
@@ -300,6 +330,7 @@ export async function verify(ctx) {
     runtime = [];
   for (const p of profile.manifest.plugins) {
     const c = current.plugins[p.id];
+    if (skipMissingDisabled(ctx, current, p)) continue;
     if (!same(pluginIdentity(c?.descriptor), pluginIdentity(p)))
       differences.push(`plugin:${p.id}`);
     if (c?.sourceState?.clean === false) differences.push(`source:${p.id}`);
@@ -307,10 +338,23 @@ export async function verify(ctx) {
       runtime.push({ plugin: p.id, status: c?.status ?? "missing" });
   }
   for (const s of profile.settings)
-    if (!same(parsed(current.settings[s.file]), s.data))
+    if (
+      !skipMissingDisabled(
+        ctx,
+        current,
+        profile.manifest.plugins.find((p) => p.id === s.plugin),
+      ) &&
+      !same(parsed(current.settings[s.file]), s.data)
+    )
       differences.push(s.file);
   for (const b of profile.patches)
-    for (const f of b.data.files) {
+    for (const f of skipMissingDisabled(
+      ctx,
+      current,
+      profile.manifest.plugins.find((p) => p.id === b.plugin),
+    )
+      ? []
+      : b.data.files) {
       const raw = current.patches[`${b.plugin}/${f.path}`];
       if (raw === null || digest(Buffer.from(raw, "base64")) !== f.afterSha256)
         differences.push(`patch:${b.plugin}/${f.path}`);

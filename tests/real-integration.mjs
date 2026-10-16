@@ -115,6 +115,42 @@ try {
   console.log(
     "PASS: native settings, daemon PID binding, RPC jobs, preview approval and idempotent apply",
   );
+  await writeJson(path.join(repo, "profile.json"), {
+    schemaVersion: 1,
+    plugins: [
+      {
+        id: "firstmate",
+        source: "npm:@gpambrozio/paseo-firstmate",
+        revision: "0.4.0",
+        enabled: false,
+      },
+    ],
+    settings: [],
+    patches: [],
+  });
+  const skipPreview = await operation({ kind: "plan" });
+  assert.deepEqual(skipPreview.conflicts, []);
+  assert.deepEqual(skipPreview.changes, []);
+  assert.deepEqual(skipPreview.skipped, [
+    { plugin: "firstmate", reason: "missing-disabled" },
+  ]);
+  const skippedApply = await operation({
+    kind: "apply",
+    approval: skipPreview.approval,
+  });
+  assert.equal(skippedApply.verification.configurationMatches, true);
+  assert.ok(!(await adapter.list()).some((p) => p.id === "firstmate"));
+  await writeJson(path.join(repo, "profile.json"), {
+    schemaVersion: 1,
+    plugins: [],
+    settings: [],
+    patches: [],
+  });
+  const resetPlan = await operation({ kind: "plan" });
+  await operation({ kind: "apply", approval: resetPlan.approval });
+  console.log(
+    "PASS: missing disabled firstmate is explicitly skipped, no install occurs, native approval and verification succeed",
+  );
   const exportPlan = await operation({ kind: "publishPlan" });
   assert.equal(exportPlan.files.length, 0);
   console.log(

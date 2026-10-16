@@ -510,6 +510,7 @@ function ResultSummary({
 }) {
   const r = (value ?? {}) as {
     conflicts?: string[];
+    skipped?: { plugin: string; reason: string }[];
     changes?: {
       plugin: string;
       actions: string[];
@@ -546,6 +547,13 @@ function ResultSummary({
         <Text selectable key={i} style={text}>
           {t("需处理：")}
           {c}
+        </Text>
+      ))}
+      {r.skipped?.map((s) => (
+        <Text key={s.plugin} style={text}>
+          {t("跳过 {plugin}：本机未安装，配置要求保持禁用。", {
+            plugin: s.plugin,
+          })}
         </Text>
       ))}
       {r.changes?.length === 0 ? (

@@ -302,13 +302,63 @@ test("restore preserves concurrent settings saved while stopping the plugin", as
   assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), concurrent);
 });
 
-test("does not install a disabled target because Paseo install starts plugins immediately", async (t) => {
+test("skips an absent disabled target including its settings and patch, and verifies as synchronized", async (t) => {
+  const f = await fixture(t, { patch: true });
+  f.plugin.enabled = false;
+  const orphan = { version: 1, values: { previewWrap: false } };
+  await writeJson(f.setting, orphan);
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const plan = await buildPlan(f.ctx);
+  assert.deepEqual(plan.conflicts, []);
+  assert.deepEqual(plan.changes, []);
+  assert.deepEqual(plan.skipped, [
+    { plugin: "better-paseo", reason: "missing-disabled" },
+  ]);
+  const result = await applyPlan(f.ctx, plan.approval);
+  assert.equal(result.changed, false);
+  assert.equal(result.verification.configurationMatches, true);
+  assert.equal(result.verification.runtimeHealthy, true);
+  assert.deepEqual(f.calls, []);
+  assert.equal((await buildPlan(f.ctx)).changes.length, 0);
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), orphan);
+});
+
+test("skips missing disabled firstmate while installing other targets, then verifies and restores", async (t) => {
   const f = await fixture(t);
-  f.manifest.plugins[0].enabled = false;
+  f.manifest.plugins.push({
+    id: "firstmate",
+    source: "npm:@gpambrozio/paseo-firstmate",
+    revision: "0.4.0",
+    enabled: false,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const plan = await buildPlan(f.ctx);
+  assert.deepEqual(plan.conflicts, []);
+  assert.deepEqual(
+    plan.changes.map((c) => c.plugin),
+    ["better-paseo"],
+  );
+  assert.deepEqual(plan.skipped, [
+    { plugin: "firstmate", reason: "missing-disabled" },
+  ]);
+  const applied = await applyPlan(f.ctx, plan.approval);
+  assert.equal(applied.verification.configurationMatches, true);
+  assert.ok(!f.calls.some((c) => c[1] === "firstmate"));
+  assert.equal((await verify(f.ctx)).runtimeHealthy, true);
+  const undo = await restorePlan(f.ctx, applied.backupId);
+  assert.deepEqual(undo.conflicts, []);
+  await restore(f.ctx, applied.backupId, undo.approval);
+  assert.ok(!f.calls.some((c) => c[1] === "firstmate"));
+});
+
+test("a plugin appearing after skip preview invalidates its approval", async (t) => {
+  const f = await fixture(t);
+  f.plugin.enabled = false;
   await writeJson(path.join(f.root, "profile.json"), f.manifest);
   const p = await buildPlan(f.ctx);
-  assert.ok(p.conflicts.some((x) => x.includes("disabled")));
-  await assert.rejects(applyPlan(f.ctx, p.approval));
+  await f.adapter.install(f.plugin);
+  f.calls.length = 0;
+  await assert.rejects(applyPlan(f.ctx, p.approval), /stale/i);
   assert.deepEqual(f.calls, []);
 });
 
@@ -501,4 +551,42 @@ test("legacy schema v1 backups without Git source metadata remain restorable whe
   const preview = await restorePlan(f.ctx, r.backupId);
   assert.equal(preview.currentChangedSinceBackup, false);
   await restore(f.ctx, r.backupId, preview.approval);
+});
+
+test("already installed disabled targets still update without enabling them", async (t) => {
+  const f = await fixture(t, { installed: true });
+  await f.adapter.act("disable", f.plugin.id);
+  f.plugin.enabled = false;
+  f.plugin.revision = "2.0.0";
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  f.calls.length = 0;
+  const p = await buildPlan(f.ctx);
+  assert.deepEqual(p.skipped, []);
+  assert.ok(p.changes[0].actions.includes("update"));
+  await applyPlan(f.ctx, p.approval);
+  const row = (await f.adapter.list())[0];
+  assert.equal(row.enabled, false);
+  assert.equal(row.installation.currentRevision, "2.0.0");
+  assert.ok(!f.calls.some((c) => c[0] === "enable"));
+});
+
+test("restore still refuses reinstalling a previously installed disabled plugin that disappeared", async (t) => {
+  const f = await fixture(t, { installed: true });
+  await f.adapter.act("disable", f.plugin.id);
+  f.plugin.enabled = false;
+  f.plugin.revision = "2.0.0";
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const p = await buildPlan(f.ctx),
+    result = await applyPlan(f.ctx, p.approval);
+  f.adapter.list = async () => [];
+  f.calls.length = 0;
+  const undo = await restorePlan(f.ctx, result.backupId);
+  assert.ok(
+    undo.conflicts.some((c) => c.includes("Cannot install disabled target")),
+  );
+  await assert.rejects(
+    restore(f.ctx, result.backupId, undo.approval),
+    /disabled target/,
+  );
+  assert.deepEqual(f.calls, []);
 });

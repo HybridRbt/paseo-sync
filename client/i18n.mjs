@@ -1,4 +1,6 @@
 const english = {
+  "跳过 {plugin}：本机未安装，配置要求保持禁用。":
+    "Skip {plugin}: not installed on this host and disabled in the profile.",
   "操作主机：{host}。任务在此主机执行；每台 daemon 分别同步。":
     "Host: {host}. Tasks run here; sync each daemon separately.",
   配置仓库本机绝对路径: "Configuration repository absolute path",
