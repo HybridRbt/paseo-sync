@@ -71,6 +71,7 @@ test("service refuses stale plan and never applies without approval", async () =
   const f = await fixture(),
     s = service.createService(f);
   const p = await done(s, await s.start({ kind: "plan" }));
+  assert.equal(p.status, "succeeded", p.error);
   assert.equal(p.result.confirmKind, "apply");
   await assert.rejects(s.start({ kind: "apply" }), /approval/i);
   const result = await done(
