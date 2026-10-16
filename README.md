@@ -28,7 +28,7 @@ paseo plugin install git:https://github.com/HybridRbt/paseo-sync --ref v0.1.1
 
 ## 自动识别与界面语言
 
-查找在当前 daemon 主机执行，读取有效 `profile.json` 和 Git 仓库根目录；不联网、不克隆、不自动保存设置。已保存且有效的路径优先；其他查找最多访问 1500 个目录、向下 6 层，并在循环中检查 3 秒预算。`Documents`、`Projects`、`projects`、`Developer`、`src` 和用户目录下的 `paseo-profile` 为默认起点，跳过符号链接、隐藏及常见生成目录；未覆盖的目录可手动输入。达到搜索限制时不自动选择候选。Git 本地子命令使用独立超时，因此 3 秒不是整个 RPC 的硬超时。
+查找在当前 daemon 主机执行，读取有效 `profile.json` 和 Git 仓库根目录；不联网、不克隆、不自动保存设置。已保存且有效的路径优先；其他查找最多访问 1500 个目录、向下 6 层，目录、文件读取与 Git 查询共享 3 秒预算。`Documents`、`Projects`、`projects`、`Developer`、`src` 和用户目录下的 `paseo-profile` 为默认起点，跳过符号链接、隐藏及常见生成目录；未覆盖的目录可手动输入。达到搜索限制时不自动选择候选。预算耗尽即返回受限结果；底层已经开始且无法取消的只读系统操作可能在后台完成，不继续发起下一步查询。
 
 成功使用过的配置路径最多保留 20 项，在状态根目录 `connections.json` 保存。识别时读取 `origin` 的 fetch URL；push URL 不同时另外显示。带凭据、查询参数或不支持格式的 URL 不会返回界面。自动填充后点击“保存”，才更新 host 设置；不会自动应用同步差异。
 

@@ -176,6 +176,7 @@ export function translator(language) {
 }
 const key = "paseo-sync.ui-language";
 let sessionLanguage = "zh";
+let explicitlySelected = false;
 function clientStorage() {
   try {
     return globalThis.localStorage;
@@ -184,6 +185,7 @@ function clientStorage() {
   }
 }
 export function readLanguage(storage = clientStorage()) {
+  if (explicitlySelected) return sessionLanguage;
   try {
     const value = storage?.getItem(key);
     if (value === "en" || value === "zh") sessionLanguage = value;
@@ -195,6 +197,7 @@ export function readLanguage(storage = clientStorage()) {
 export function saveLanguage(language, storage = clientStorage()) {
   if (!["en", "zh"].includes(language)) return;
   sessionLanguage = language;
+  explicitlySelected = true;
   try {
     storage?.setItem(key, language);
   } catch {

@@ -43,15 +43,15 @@ function publicUrl(value) {
     return null;
   }
 }
-async function candidate(root, source, daemonHome) {
+async function candidate(root, source, daemonHome, io) {
   if (!path.isAbsolute(root)) return null;
   try {
     if (
-      !(await lstat(root)).isDirectory() ||
-      (await lstat(root)).isSymbolicLink()
+      !(await io(() => lstat(root))).isDirectory() ||
+      (await io(() => lstat(root))).isSymbolicLink()
     )
       return null;
-    const checkout = await realpath(root);
+    const checkout = await io(() => realpath(root));
     if (daemonHome) {
       const rel = path.relative(daemonHome, checkout);
       if (
@@ -62,30 +62,33 @@ async function candidate(root, source, daemonHome) {
       )
         return null;
     }
-    const profileFile = await safeFile(checkout, "profile.json");
-    const info = await lstat(profileFile);
+    const profileFile = await io(() => safeFile(checkout, "profile.json"));
+    const info = await io(() => lstat(profileFile));
     if (!info.isFile() || info.size > 2 * 1024 * 1024) return null;
-    validateProfile(JSON.parse(await readFile(profileFile, "utf8")));
-    const marker = await jsonOrNull(
-      await safeFile(checkout, "paseo-plugin.json"),
+    validateProfile(JSON.parse(await io(() => readFile(profileFile, "utf8"))));
+    const marker = await io(async () =>
+      jsonOrNull(await safeFile(checkout, "paseo-plugin.json")),
     );
     if (marker?.id === "paseo-sync") return null;
     if (
-      (await realpath(await git(checkout, "rev-parse", "--show-toplevel"))) !==
-      checkout
+      (await io(async () =>
+        realpath(await git(checkout, "rev-parse", "--show-toplevel")),
+      )) !== checkout
     )
       return null;
     let fetch = "",
       pushes = [];
     try {
-      fetch = await git(checkout, "remote", "get-url", "origin");
+      fetch = await io(() => git(checkout, "remote", "get-url", "origin"));
     } catch {
       /* No origin is supported. */
     }
     if (fetch) {
       try {
         pushes = (
-          await git(checkout, "remote", "get-url", "--push", "--all", "origin")
+          await io(() =>
+            git(checkout, "remote", "get-url", "--push", "--all", "origin"),
+          )
         ).split("\n");
       } catch {
         /* Display read failure below. */
@@ -134,8 +137,32 @@ export async function discoverRepositories({
   let limited = false,
     savedInvalid = false,
     scanned = 0;
+  let timedOut = false;
+  const io = async (fn) => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      limited = timedOut = true;
+      throw new Error("Discovery time budget exhausted");
+    }
+    let timer;
+    try {
+      return await Promise.race([
+        fn(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            limited = timedOut = true;
+            reject(new Error("Discovery time budget exhausted"));
+          }, remaining);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   const add = async (p, source) => {
-    const c = await candidate(p, source, daemonHome);
+    if (timedOut) return null;
+    const c = await candidate(p, source, daemonHome, io);
+    if (timedOut) return null;
     if (c && !seen.has(c.checkout)) {
       seen.add(c.checkout);
       candidates.push(c);
@@ -146,11 +173,11 @@ export async function discoverRepositories({
     const saved = await add(checkout, "saved");
     if (saved)
       return { candidates, selected: saved, savedInvalid, limited, scanned };
-    savedInvalid = true;
+    savedInvalid = !timedOut;
   }
   let history = [];
   try {
-    const h = await jsonOrNull(historyFile);
+    const h = await io(() => jsonOrNull(historyFile));
     if (Array.isArray(h)) history = h.slice(0, 20);
   } catch {
     /* Corrupt history cannot block manual setup. */
@@ -158,35 +185,36 @@ export async function discoverRepositories({
   for (const p of history) if (typeof p === "string") await add(p, "history");
   const queue = roots.map((root) => ({ root, depth: 0 }));
   while (queue.length) {
-    if (scanned >= maxDirectories || Date.now() >= deadline) {
+    if (scanned >= maxDirectories || Date.now() >= deadline || timedOut) {
       limited = true;
       break;
     }
     const { root, depth } = queue.shift();
     scanned++;
     try {
-      const s = await lstat(root);
+      const s = await io(() => lstat(root));
       if (s.isSymbolicLink() || !s.isDirectory()) continue;
-      const entries = await readdir(root, { withFileTypes: true });
+      const entries = await io(() => readdir(root, { withFileTypes: true }));
       if (entries.some((e) => e.name === "profile.json" && e.isFile()))
         await add(root, "search");
       // Do not descend into repository internals or bulky generated directories.
-      if (depth < maxDepth)
-        for (const e of entries) {
-          if (
-            e.isDirectory() &&
-            !e.name.startsWith(".") &&
-            ![
-              "node_modules",
-              "vendor",
-              "dist",
-              "build",
-              "Library",
-              "Applications",
-            ].includes(e.name)
-          )
-            queue.push({ root: path.join(root, e.name), depth: depth + 1 });
+      for (const e of entries) {
+        if (
+          e.isDirectory() &&
+          !e.name.startsWith(".") &&
+          ![
+            "node_modules",
+            "vendor",
+            "dist",
+            "build",
+            "Library",
+            "Applications",
+          ].includes(e.name)
+        ) {
+          if (depth >= maxDepth) limited = true;
+          else queue.push({ root: path.join(root, e.name), depth: depth + 1 });
         }
+      }
     } catch {
       /* Missing or inaccessible directories are normal. */
     }

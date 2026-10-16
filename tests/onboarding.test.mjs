@@ -78,3 +78,39 @@ test("client language preference survives with local storage and denied storage 
   saveLanguage("zh", denied);
   assert.equal(readLanguage(denied), "zh");
 });
+
+test("editing a clone target preserves a manually entered URL and clears only a discovered URL", async () => {
+  const { editCheckout } = await import("../shared/onboarding.mjs");
+  const draft = {
+    checkout: "/old",
+    repositoryUrl: "https://example.com/manual.git",
+    cliPath: "cli",
+  };
+  assert.deepEqual(editCheckout(draft, "/new", null), {
+    ...draft,
+    checkout: "/new",
+  });
+  const found = { repositoryUrl: "https://example.com/auto.git" };
+  assert.equal(
+    editCheckout(
+      { ...draft, repositoryUrl: found.repositoryUrl },
+      "/new",
+      found,
+    ).repositoryUrl,
+    "",
+  );
+  assert.equal(
+    editCheckout(draft, "/new", found).repositoryUrl,
+    draft.repositoryUrl,
+  );
+});
+test("a session choice wins when storage is readable but refuses writes", () => {
+  const storage = {
+    getItem: () => "zh",
+    setItem: () => {
+      throw Error("quota");
+    },
+  };
+  saveLanguage("en", storage);
+  assert.equal(readLanguage(storage), "en");
+});

@@ -11,3 +11,14 @@ export function mergeDiscovery(draft, requested, candidate) {
     repositoryUrl: candidate.repositoryUrl ?? draft.repositoryUrl,
   };
 }
+export function editCheckout(draft, checkout, discovered) {
+  return {
+    ...draft,
+    checkout,
+    repositoryUrl:
+      discovered?.repositoryUrl &&
+      draft.repositoryUrl === discovered.repositoryUrl
+        ? ""
+        : draft.repositoryUrl,
+  };
+}

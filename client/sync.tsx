@@ -5,6 +5,8 @@ import {
   SettingsCard,
   SettingsInput,
   SettingsAction,
+  type SettingsInputProps,
+  type SettingsInputHandle,
 } from "@getpaseo/plugin/client/ui";
 import { useEffect, useState, useRef } from "react";
 import { ScrollView, Text, View, Pressable } from "react-native";
@@ -12,7 +14,18 @@ import { syncSettings } from "../shared/settings";
 import { startRpc, jobRpc, unlockRpc, discoverRpc } from "../shared/rpc";
 import type { z } from "zod";
 import { translator, readLanguage, saveLanguage } from "./i18n.mjs";
-import { mergeDiscovery } from "../shared/onboarding.mjs";
+import { mergeDiscovery, editCheckout } from "../shared/onboarding.mjs";
+function SyncedSettingsInput({
+  initialValue = "",
+  ...props
+}: SettingsInputProps) {
+  const input = useRef<SettingsInputHandle>(null);
+  useEffect(() => {
+    if (input.current && input.current.getText() !== initialValue)
+      input.current.replaceText(initialValue);
+  }, [initialValue]);
+  return <SettingsInput {...props} initialValue={initialValue} ref={input} />;
+}
 type Discovery = z.infer<typeof discoverRpc.output>;
 type Request = z.infer<typeof startRpc.input>;
 type Job = {
@@ -46,20 +59,20 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
   const t = translator(language);
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
   const [searching, setSearching] = useState(false),
-    [searchError, setSearchError] = useState(false);
+    [searchError, setSearchError] = useState("");
   const [editing, setEditing] = useState(false);
   const searchEpoch = useRef(0);
   async function findRepositories(requested = draft) {
     const epoch = ++searchEpoch.current;
     setSearching(true);
-    setSearchError(false);
+    setSearchError("");
     try {
       const found = await discover({ checkout: requested.checkout });
       if (epoch !== searchEpoch.current) return;
       setDiscovery(found);
       setDraft((current) => mergeDiscovery(current, requested, found.selected));
-    } catch {
-      if (epoch === searchEpoch.current) setSearchError(true);
+    } catch (e) {
+      if (epoch === searchEpoch.current) setSearchError(String(e));
     } finally {
       if (epoch === searchEpoch.current) setSearching(false);
     }
@@ -197,6 +210,11 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
           {searchError ? (
             <Text style={muted}>{t("搜索失败，可手动填写。")}</Text>
           ) : null}
+          {searchError ? (
+            <Text selectable style={muted}>
+              {searchError}
+            </Text>
+          ) : null}
           {discovery?.savedInvalid ? (
             <Text style={muted}>
               {t("已保存路径不可用，请选择候选仓库或手动输入。")}
@@ -286,18 +304,16 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
                     !selectedRepository.repositoryUrl)),
             )
             .map(([key, label]) => (
-              <SettingsInput
-                key={`${key}:${settings.status === "ready" ? settings.revision : ""}:${discovery?.selected?.checkout ?? ""}:${selectedRepository?.checkout ?? ""}`}
+              <SyncedSettingsInput
+                key={`${host.id}:${key}:${settings.status === "ready" ? settings.revision : ""}`}
                 label={t(label)}
                 initialValue={draft[key]}
                 disabled={busy}
                 onChangeText={(v) => {
-                  if (key === "checkout") setDiscovery(null);
-                  setDraft((d) => ({
-                    ...d,
-                    [key]: v,
-                    ...(key === "checkout" ? { repositoryUrl: "" } : {}),
-                  }));
+                  if (key === "checkout") {
+                    setDiscovery(null);
+                    setDraft((d) => editCheckout(d, v, selectedRepository));
+                  } else setDraft((d) => ({ ...d, [key]: v }));
                 }}
               />
             ))}

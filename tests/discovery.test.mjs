@@ -140,3 +140,22 @@ test("scan is bounded and does not follow directory links", async (t) => {
   assert.equal(r.candidates.length, 0);
   assert.equal(r.limited, true);
 });
+
+test("depth-truncated search never treats its visible candidate as unique", async () => {
+  const f = await fixture();
+  await repo(f.home);
+  await repo(path.join(f.home, "deeper"));
+  const r = await discoverRepositories({ ...f, maxDepth: 0 });
+  assert.equal(r.candidates.length, 1);
+  assert.equal(r.limited, true);
+  assert.equal(r.selected, null);
+});
+
+test("time budget also covers saved-path probing, not only the scan loop", async () => {
+  const f = await fixture();
+  const checkout = await repo(path.join(f.home, "saved"));
+  const r = await discoverRepositories({ ...f, checkout, maxMs: 0 });
+  assert.equal(r.selected, null);
+  assert.equal(r.limited, true);
+  assert.equal(r.savedInvalid, false);
+});
