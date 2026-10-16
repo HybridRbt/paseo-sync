@@ -10,9 +10,11 @@ import {
   objectHash,
   atomicWrite,
   relativeName,
+  writeJson,
 } from "./files.mjs";
 import { exportProfile } from "./export.mjs";
 import { loadProfile } from "./profile.mjs";
+import { captureBaseline } from "./sync.mjs";
 import { withOperation } from "./lock.mjs";
 import { git } from "./git.mjs";
 export { git } from "./git.mjs";
@@ -78,13 +80,24 @@ async function exportSnapshot(ctx) {
   const head = await cleanRepository(ctx.root),
     remotes = await git(ctx.root, "remote");
   let origin = null,
-    upstream = null;
+    upstream = null,
+    pushUrl = null;
   if (remotes.split("\n").includes("origin")) {
     origin = await git(ctx.root, "remote", "get-url", "origin");
     if (/^https?:\/\/[^/]*@/i.test(origin))
       throw new Error(
         "Origin URL contains credentials; use a credential helper instead.",
       );
+    const pushUrls = (
+      await git(ctx.root, "remote", "get-url", "--push", "--all", "origin")
+    )
+      .split("\n")
+      .filter(Boolean);
+    if (pushUrls.length !== 1)
+      throw new Error("Exactly one reviewed push URL is required");
+    pushUrl = pushUrls[0];
+    if (/^https?:\/\/[^/]*@/i.test(pushUrl))
+      throw new Error("Push URL contains credentials; use a credential helper");
     await git(ctx.root, "fetch", "--no-tags", "origin");
     const up = await git(
       ctx.root,
@@ -143,15 +156,18 @@ async function exportSnapshot(ctx) {
       head,
       origin,
       upstream,
+      pushUrl,
       files,
-      approval: objectHash({ head, origin, upstream, files }),
+      _baseline: await captureBaseline(ctx, loaded),
+      approval: objectHash({ head, origin, pushUrl, upstream, files }),
     };
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
 }
 export async function publishPlan(ctx) {
-  return exportSnapshot(ctx);
+  const { _baseline, ...preview } = await exportSnapshot(ctx);
+  return preview;
 }
 export async function publish(ctx, approval, { push = true } = {}) {
   return withOperation(ctx, async () => {
@@ -175,11 +191,13 @@ export async function publish(ctx, approval, { push = true } = {}) {
       );
     }
     const commit = await git(ctx.root, "rev-parse", "HEAD");
+    await writeJson(await safeFile(ctx.state, "baseline.json"), p._baseline);
     if (push)
       await git(
         ctx.root,
         "push",
-        "origin",
+        "--",
+        p.pushUrl,
         `HEAD:refs/heads/${p.upstream.slice(7)}`,
       );
     return { committed: p.files.length > 0, pushed: push, commit };

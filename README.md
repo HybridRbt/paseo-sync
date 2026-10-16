@@ -22,7 +22,7 @@ paseo plugin install git:https://github.com/HybridRbt/paseo-sync --ref v0.1.0
 2. 保存设置，点击“初始化或拉取仓库”。仅允许干净工作区和快进更新；冲突保留现场。已有配置仓库可直接使用，不需要从本公开仓库复制个人文件。
 3. 检查主机环境。如果 CLI 不在 GUI daemon 的 PATH，填写 CLI 绝对路径。自定义 daemon home 也需填写；插件会验证进程所属关系，拒绝操作其他 daemon。
 4. 先预览并确认 Cafe 自动更新排除项，再预览并确认同步配置。
-5. 修改本机配置后，用“发布本机配置”检查文件差异，确认后提交并推送。Git 作者身份及认证需提前在主机配置。
+5. 修改本机配置后，用“发布本机配置”检查文件差异，确认后提交并推送到预览中显示的实际 push URL；多个推送地址会拒绝。Git 作者身份及认证需提前在主机配置。
 
 新仓库没有 `profile.json` 时，可以先预览发布本机配置来生成第一份清单。仓库需要已有初始提交；本地目录安装和无法追溯来源的第三方插件不能导出。同控制器的目录安装会被排除。
 
@@ -35,7 +35,7 @@ paseo plugin install git:https://github.com/HybridRbt/paseo-sync --ref v0.1.0
 | 来源切换 | 明确阻止，需要单独迁移，不自动卸载重装。 |
 | 禁用插件 | 可更新已存在且禁用的插件；缺失但目标禁用的插件不会被短暂启用安装。 |
 | Better Paseo | 仅 `presentation` 中审核过的字段。未知字段拒绝，不能扫整个设置目录。 |
-| 源码补丁 | 只执行清单明确列出的替换，校验原始和结果 SHA256；未知文件拒绝。 |
+| 源码补丁 | Git 未记录的源码或未跟踪文件会阻止更新；只执行清单明确列出的替换，校验原始和结果 SHA256；未知文件拒绝。 |
 | Cafe | 为受管插件及控制器合并自动更新排除项，保留原字段、原排除项，单独备份和恢复。 |
 | 同步插件自身 | 排除导出与应用，需在同步任务结束后通过 Paseo 管理入口单独更新。 |
 | 额外本机插件 | 不自动删除。 |
@@ -48,7 +48,7 @@ paseo plugin install git:https://github.com/HybridRbt/paseo-sync --ref v0.1.0
 
 新安装插件在恢复时停用并保留，避免删除数据。已有插件使用明确的 update 恢复版本，无法表达的 registry 转换会拒绝。恢复前检查当前状态与操作结束快照；有后续本地修改时拒绝覆盖。
 
-进程异常退出会将任务标为 `interrupted`。先检查 daemon 实际状态、备份和锁，再解除锁；不能把中断视为成功。没有结束快照的备份不能自动恢复。首版保留所有备份，不自动清理，也不自动重新执行修改命令。
+进程异常退出会将任务标为 `interrupted`。先检查 daemon 实际状态、备份和锁，再解除锁；不能把中断视为成功。没有结束快照的备份不能自动恢复。普通恢复失败会记录新结束快照和原备份 ID，可在重新检查差异后重试。首版保留所有备份，不自动清理，也不自动重新执行修改命令。
 
 本机状态保存在 macOS/Linux 的 `~/.local/state/paseo-sync/` 或 Windows 的 `%LOCALAPPDATA%/PaseoSync/` 下，按 daemon home 和配置 checkout 分隔；操作锁按 daemon 共用。可以在启动 daemon 时用 `PASEO_SYNC_STATE` 指定状态根目录。
 
@@ -60,6 +60,8 @@ node tools/paseo-profile.mjs plan --repo /absolute/path/to/private-profile
 node tools/paseo-profile.mjs apply --repo /absolute/path/to/private-profile --approve <plan.approval>
 node tools/paseo-profile.mjs verify --repo /absolute/path/to/private-profile
 ```
+
+发布提交后会刷新本机基线；推送失败保留本地提交，重新预览后可重试推送。
 
 CLI 保留原有基线冲突、设置白名单、备份和摘要保护。原生入口还负责 Cafe 管理权预览、Git 发布和持久化任务。应用只同步当前仓库包含的项目，不对多个 daemon 批量执行。
 

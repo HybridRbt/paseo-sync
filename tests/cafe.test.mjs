@@ -77,3 +77,54 @@ test("Cafe stale previews and concurrent writes are rejected", async () => {
     ["concurrent"],
   );
 });
+
+test("accepts current Cafe v5 documents and preserves browse and registry values", async () => {
+  const f = await fixture();
+  const current = {
+    version: 5,
+    values: {
+      registryUrl: "https://plugins.paseo.sh",
+      browse: { query: "keep", categories: [] },
+      autoUpdateOptOuts: ["other"],
+    },
+  };
+  await writeJson(f.file, current);
+  const p = await cafe.cafePlan(f.ctx, ["demo"]);
+  const r = await cafe.applyCafe(f.ctx, ["demo"], p.approval);
+  const after = JSON.parse(await readFile(f.file, "utf8"));
+  assert.equal(after.version, 5);
+  assert.deepEqual(after.values.browse, current.values.browse);
+  assert.equal(after.values.registryUrl, current.values.registryUrl);
+  const restore = await cafe.cafeRestorePlan(f.ctx, r.backupId);
+  await cafe.restoreCafe(f.ctx, r.backupId, restore.approval);
+  assert.deepEqual(JSON.parse(await readFile(f.file, "utf8")), current);
+});
+test("Cafe failed enable can be restored and restores original enabled state", async () => {
+  const f = await fixture(),
+    act = f.ctx.adapter.act;
+  let fail = true;
+  f.ctx.adapter.act = async (a) => {
+    if (a === "enable" && fail) throw new Error("enable failure");
+    return act(a);
+  };
+  const p = await cafe.cafePlan(f.ctx, ["demo"]);
+  let backupId;
+  await assert.rejects(cafe.applyCafe(f.ctx, ["demo"], p.approval), (e) => {
+    backupId = e.backupId;
+    return !!backupId;
+  });
+  fail = false;
+  const restore = await cafe.cafeRestorePlan(f.ctx, backupId);
+  await cafe.restoreCafe(f.ctx, backupId, restore.approval);
+  assert.equal((await f.ctx.adapter.list())[0].enabled, true);
+  assert.deepEqual(JSON.parse(await readFile(f.file, "utf8")), f.original);
+});
+test("Cafe restore rejects enabled-state changes made after the operation", async () => {
+  const f = await fixture(),
+    p = await cafe.cafePlan(f.ctx, ["demo"]);
+  const r = await cafe.applyCafe(f.ctx, ["demo"], p.approval);
+  await f.ctx.adapter.act("disable");
+  const restore = await cafe.cafeRestorePlan(f.ctx, r.backupId);
+  assert.ok(restore.conflicts.length);
+  await assert.rejects(cafe.restoreCafe(f.ctx, r.backupId, restore.approval));
+});

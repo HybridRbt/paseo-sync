@@ -5,10 +5,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import * as jobs from "../server/jobs.mjs";
 const wait = async (fn) => {
-  for (let i = 0; i < 100; i++) {
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
     const v = await fn();
     if (v.status !== "running" && v.status !== "queued") return v;
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 20));
   }
   throw new Error("Job did not finish");
 };

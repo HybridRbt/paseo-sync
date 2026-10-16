@@ -1,3 +1,4 @@
+import { sourceState } from "./source-state.mjs";
 import { acquireOperation } from "./lock.mjs";
 import { randomUUID } from "node:crypto";
 import { readFile, mkdir, rm, lstat } from "node:fs/promises";
@@ -57,7 +58,12 @@ async function capture(ctx, profile) {
   for (const p of profile.manifest.plugins) {
     const row = byId.get(p.id);
     plugins[p.id] = row
-      ? { descriptor: snapshotPlugin(row), path: row.path, status: row.status }
+      ? {
+          descriptor: snapshotPlugin(row),
+          path: row.path,
+          status: row.status,
+          sourceState: await sourceState(row, profile),
+        }
       : null;
   }
   for (const s of profile.settings) {
@@ -92,7 +98,11 @@ function comparable(s) {
       Object.entries(s.plugins).map(([k, v]) => [
         k,
         v
-          ? { descriptor: pluginIdentity(v.descriptor), status: v.status }
+          ? {
+              descriptor: pluginIdentity(v.descriptor),
+              status: v.status,
+              sourceState: v.sourceState ?? null,
+            }
           : null,
       ]),
     ),
@@ -146,6 +156,10 @@ async function planData(ctx) {
     const currentPlugin = current.plugins[target.id],
       now = currentPlugin?.descriptor ?? null;
     const actions = [];
+    if (currentPlugin?.sourceState?.clean === false)
+      conflicts.push(
+        `Local source edits or dirty Git HEAD prevent synchronization: ${target.id}`,
+      );
     const sameVersion =
       now &&
       same(
@@ -254,6 +268,27 @@ async function saveBaseline(ctx, current, profile) {
     ...baseState(current),
   });
 }
+export async function captureBaseline(ctx, profile) {
+  const current = await capture(ctx, profile);
+  for (const p of profile.manifest.plugins)
+    if (
+      !same(
+        pluginIdentity(current.plugins[p.id]?.descriptor),
+        pluginIdentity(p),
+      )
+    )
+      throw new Error("Local plugin state changed while preparing publish");
+  for (const setting of profile.settings)
+    if (!same(parsed(current.settings[setting.file]), setting.data))
+      throw new Error("Local settings changed while preparing publish");
+  for (const bundle of profile.patches)
+    for (const f of bundle.data.files) {
+      const raw = current.patches[`${bundle.plugin}/${f.path}`];
+      if (raw === null || digest(Buffer.from(raw, "base64")) !== f.afterSha256)
+        throw new Error("Local source patch changed while preparing publish");
+    }
+  return { schemaVersion: 1, profileHash: profile.hash, ...baseState(current) };
+}
 export async function verify(ctx) {
   const profile = await loadProfile(ctx.root),
     current = await capture(ctx, profile);
@@ -263,6 +298,7 @@ export async function verify(ctx) {
     const c = current.plugins[p.id];
     if (!same(pluginIdentity(c?.descriptor), pluginIdentity(p)))
       differences.push(`plugin:${p.id}`);
+    if (c?.sourceState?.clean === false) differences.push(`source:${p.id}`);
     if (p.enabled && c?.status !== "running")
       runtime.push({ plugin: p.id, status: c?.status ?? "missing" });
   }
@@ -348,7 +384,15 @@ export async function applyPlan(ctx, approval) {
         if (!row) throw new Error(`Install returned no plugin: ${id}`);
         if (row.enabled) await ctx.adapter.act("disable", id);
       }
-      if (change.actions.includes("update")) await ctx.adapter.update(target);
+      if (change.actions.includes("update")) {
+        const latest = (await ctx.adapter.list()).find((p) => p.id === id);
+        if (
+          !latest ||
+          !same(await sourceState(latest, profile), before.sourceState ?? null)
+        )
+          throw new Error(`Local source changed while stopping ${id}`);
+        await ctx.adapter.update(target);
+      }
       const row = (await ctx.adapter.list()).find((x) => x.id === id);
       if (!row) throw new Error(`Missing plugin after install: ${id}`);
       const installed = snapshotPlugin(row);
@@ -424,12 +468,14 @@ export async function restorePlan(ctx, id) {
     throw new Error("Backup is missing or belongs to another Paseo home");
   const current = await capture(ctx, b.profile);
   const conflicts = [];
-  if (b.after === null || b.status === "pending")
+  if (b.after === null || b.status === "pending" || b.status === "restoring")
     conflicts.push(
       "Interrupted backup has no verified final state; inspect daemon state before restoring.",
     );
   for (const [plugin, before] of Object.entries(b.before.plugins)) {
     const now = current.plugins[plugin];
+    if (now?.sourceState?.clean === false)
+      conflicts.push(`Local source edits prevent restoring ${plugin}`);
     if (before) {
       const conflict = transitionConflict(
         now?.descriptor ?? null,
@@ -441,6 +487,19 @@ export async function restorePlan(ctx, id) {
   }
   return {
     backupId: id,
+    changes: b.profile.manifest.plugins.map((p) => ({
+      plugin: p.id,
+      actions: ["restore"],
+      from: current.plugins[p.id]?.descriptor ?? null,
+      to: b.before.plugins[p.id]?.descriptor ?? { ...p, enabled: false },
+      settings: b.profile.settings
+        .filter((s) => s.plugin === p.id)
+        .map((s) => ({
+          document: s.document,
+          before: parsed(current.settings[s.file]),
+          after: parsed(b.before.settings[s.file]),
+        })),
+    })),
     approval: objectHash({ backup: b, current: comparable(current) }),
     conflicts,
     currentChangedSinceBackup:
@@ -455,6 +514,7 @@ export async function restorePlan(ctx, id) {
 export async function restore(ctx, id, approval) {
   await privateRoot(ctx.state);
   const release = await acquireOperation(ctx);
+  let backup = null;
   try {
     const preview = await restorePlan(ctx, id);
     if (preview.approval !== approval) throw new Error("Restore plan is stale");
@@ -464,6 +524,11 @@ export async function restore(ctx, id, approval) {
         "Current managed data changed after the operation; resolve those changes before restoring.",
       );
     const b = preview._backup;
+    backup = b;
+    b.operationAfter ??= b.after;
+    b.status = "restoring";
+    b.phase = "restore:start";
+    await writeJson(await backupFile(ctx, id), b);
     const assertCurrentSettings = async (plugin) => {
       for (const s of b.profile.settings.filter((x) => x.plugin === plugin)) {
         const raw = await bytesOrNull(await settingsFile(ctx, s));
@@ -477,9 +542,21 @@ export async function restore(ctx, id, approval) {
       }
     };
     for (const target of b.profile.manifest.plugins) {
+      b.phase = `restore:${target.id}`;
+      await writeJson(await backupFile(ctx, id), b);
       const before = b.before.plugins[target.id];
       let row = (await ctx.adapter.list()).find((x) => x.id === target.id);
       if (row?.enabled) await ctx.adapter.act("disable", target.id);
+      if (
+        row &&
+        !same(
+          await sourceState(row, b.profile),
+          preview._current.plugins[target.id]?.sourceState ?? null,
+        )
+      )
+        throw new Error(
+          `Local source changed while stopping ${target.id} for restore`,
+        );
       await assertCurrentSettings(target.id);
       if (!before) {
         for (const s of b.profile.settings.filter(
@@ -567,6 +644,19 @@ export async function restore(ctx, id, approval) {
         .filter((p) => !b.before.plugins[p.id])
         .map((p) => p.id),
     };
+  } catch (error) {
+    if (backup) {
+      backup.status = "restore-failed";
+      backup.error = error.message;
+      try {
+        backup.after = await capture(ctx, backup.profile);
+      } catch {
+        backup.after = null;
+      }
+      await writeJson(await backupFile(ctx, id), backup);
+      error.backupId = id;
+    }
+    throw error;
   } finally {
     await release();
   }

@@ -134,6 +134,81 @@ try {
   console.log(
     "PASS: real npm upgrade and downgrade with configured ID and disabled state preserved",
   );
+  // Validate the real Cafe 1.0.1 settings schema through its own native RPC.
+  await adapter.install({
+    id: "paseo-cafe",
+    source: "npm:paseo-cafe",
+    revision: "1.0.1",
+    enabled: true,
+  });
+  const cafeSettings = await client.invokePluginRpc(
+    "paseo-cafe",
+    "settings.directory-settings.read",
+    {},
+  );
+  assert.equal(cafeSettings.status, "ready");
+  const cafeSaved = await client.invokePluginRpc(
+    "paseo-cafe",
+    "settings.directory-settings.write",
+    {
+      revision: cafeSettings.revision,
+      values: { ...cafeSettings.values, autoUpdateOptOuts: [] },
+    },
+  );
+  assert.equal(cafeSaved.status, "saved");
+  await adapter.act("disable", "paseo-cafe");
+  const manifest = {
+    schemaVersion: 1,
+    plugins: [
+      {
+        id: "paseo-cafe",
+        source: "npm:paseo-cafe",
+        revision: "1.0.1",
+        enabled: true,
+      },
+      { ...target, enabled: false },
+    ],
+    settings: [],
+    patches: [],
+  };
+  await writeJson(path.join(repo, "profile.json"), manifest);
+  const git = async (...args) =>
+    (
+      await exec("git", ["-c", "core.fsmonitor=false", "-C", repo, ...args])
+    ).stdout.trim();
+  await git("add", "profile.json");
+  await git("commit", "-qm", "track test plugins");
+  const blocked = await operation({ kind: "plan" });
+  assert.ok(blocked.conflicts.some((x) => x.includes("Cafe")));
+  const cafePlan = await operation({ kind: "cafePlan" });
+  const cafeApplied = await operation({
+    kind: "cafe",
+    approval: cafePlan.approval,
+  });
+  assert.ok(cafeApplied.backupId.startsWith("cafe:"));
+  const enablePlan = await operation({ kind: "plan" });
+  assert.deepEqual(enablePlan.conflicts, []);
+  await operation({ kind: "apply", approval: enablePlan.approval });
+  console.log(
+    "PASS: actual Cafe v5 settings, exclusion approval, and native apply",
+  );
+  const bare = path.join(base, "profile-remote.git");
+  await exec("git", ["init", "--bare", "-q", bare]);
+  await git("remote", "add", "origin", bare);
+  await git("push", "-u", "origin", "HEAD");
+  for (const action of ["enable", "disable"]) {
+    await adapter.act(action, target.id);
+    const preview = await operation({ kind: "publishPlan" });
+    assert.equal(preview.pushUrl, bare);
+    const published = await operation({
+      kind: "publish",
+      approval: preview.approval,
+    });
+    assert.equal(published.pushed, true);
+  }
+  console.log(
+    "PASS: two consecutive native publishes to a temporary Git remote with baseline refresh",
+  );
   console.log(JSON.stringify({ result: "passed", temporaryHome: home }));
 } finally {
   await client?.close().catch(() => {});

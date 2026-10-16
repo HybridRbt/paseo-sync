@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
@@ -71,7 +72,20 @@ export async function atomicWrite(file, data) {
   const temporary = `${file}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, data, { mode: 0o600, flag: "wx" });
-    await rename(temporary, file);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await fs.rename(temporary, file);
+        break;
+      } catch (error) {
+        if (
+          process.platform !== "win32" ||
+          !["EPERM", "EACCES", "EBUSY"].includes(error.code) ||
+          attempt >= 5
+        )
+          throw error;
+        await new Promise((resolve) => setTimeout(resolve, 20 * 2 ** attempt));
+      }
+    }
   } finally {
     await rm(temporary, { force: true });
   }

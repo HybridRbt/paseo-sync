@@ -273,14 +273,17 @@ export function createService({
             ...ctx.selfIds,
           ]),
         ];
-      return applyCafe(ctx, ids, p._innerApproval);
+      const r = await applyCafe(ctx, ids, p._innerApproval);
+      return r.backupId ? { ...r, backupId: `cafe:${r.backupId}` } : r;
     }
     if (input.kind === "restore") {
       const cafe = input.backupId.startsWith("cafe:"),
         id = cafe ? input.backupId.slice(5) : input.backupId;
-      return cafe
-        ? restoreCafe(ctx, id, p._innerApproval)
-        : restore(ctx, id, p._innerApproval);
+      if (cafe) {
+        const r = await restoreCafe(ctx, id, p._innerApproval);
+        return { ...r, backupId: `cafe:${r.backupId}` };
+      }
+      return restore(ctx, id, p._innerApproval);
     }
     return applyPlan(ctx, p._innerApproval);
   }
@@ -289,7 +292,18 @@ export function createService({
       if (mutations.has(input.kind) && !input.approval)
         throw new Error("Approval digest is required");
       const c = await connection();
-      return c.manager.start(input.kind, (phase) => execute(c, input, phase));
+      return c.manager.start(input.kind, async (phase) => {
+        try {
+          return await execute(c, input, phase);
+        } catch (e) {
+          if (
+            e.backupId &&
+            (input.kind === "cafe" || input.backupId?.startsWith("cafe:"))
+          )
+            e.backupId = `cafe:${e.backupId}`;
+          throw e;
+        }
+      });
     },
     async getJob(id) {
       const c = await connection(false);

@@ -243,7 +243,7 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
           ) : null}
           {job.backupId ? (
             <Text selectable style={text}>
-              备份：{job.kind === "cafe" ? "cafe:" : ""}
+              备份：
               {job.backupId}
             </Text>
           ) : null}
@@ -310,6 +310,8 @@ function ResultSummary({ value, color }: { value: unknown; color: string }) {
       to?: { revision: string };
       settings?: { document: string; before: unknown; after: unknown }[];
     }[];
+    pushUrl?: string;
+    upstream?: string;
     files?: { path: string; before: string | null; after: string }[];
     missing?: string[];
     backups?: { id: string; status: string }[];
@@ -327,6 +329,11 @@ function ResultSummary({ value, color }: { value: unknown; color: string }) {
   const text = { color };
   return (
     <View style={{ gap: 8 }}>
+      {r.pushUrl ? (
+        <Text selectable style={text}>
+          发布到：{r.pushUrl} · {r.upstream}
+        </Text>
+      ) : null}
       {r.conflicts?.map((c, i) => (
         <Text selectable key={i} style={text}>
           需处理：{c}

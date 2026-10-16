@@ -100,3 +100,59 @@ test("credential-bearing origin URLs are rejected before fetch or preview output
   );
   await assert.rejects(repository.publishPlan(f), /origin.*credential/i);
 });
+
+test("successful publish advances baseline so later local changes can be published again", async () => {
+  const f = await fixture();
+  let p = await repository.publishPlan(f);
+  await repository.publish(f, p.approval, { push: false });
+  const { loadProfile } = await import("../server/core/profile.mjs");
+  const { objectHash } = await import("../server/core/files.mjs");
+  const plugin = JSON.parse(
+    await readFile(path.join(f.root, "profile.json"), "utf8"),
+  ).plugins[0];
+  await writeJson(path.join(f.state, "baseline.json"), {
+    schemaVersion: 1,
+    profileHash: (await loadProfile(f.root)).hash,
+    plugins: { demo: plugin },
+    settings: {},
+    patches: {},
+  });
+  f.rows[0].installation.currentRevision = "2.0.0";
+  p = await repository.publishPlan(f);
+  await repository.publish(f, p.approval, { push: false });
+  f.rows[0].installation.currentRevision = "3.0.0";
+  p = await repository.publishPlan(f);
+  assert.match(p.files[0].after, /3.0.0/);
+});
+test("publish preview binds the actual push URL and execution uses that reviewed URL", async () => {
+  const f = await fixture(),
+    fetch = path.join(path.dirname(f.root), "fetch.git"),
+    push = path.join(path.dirname(f.root), "push.git");
+  for (const dir of [fetch, push])
+    execFileSync("git", ["init", "--bare", "-q", dir]);
+  f.git("remote", "add", "origin", fetch);
+  f.git("push", "-u", "origin", "HEAD:shared");
+  f.git("branch", "--set-upstream-to", "origin/shared");
+  f.git("remote", "set-url", "--push", "origin", push);
+  const p = await repository.publishPlan(f);
+  assert.equal(p.pushUrl, push);
+  await repository.publish(f, p.approval);
+  assert.equal(
+    execFileSync("git", ["--git-dir", push, "rev-parse", "refs/heads/shared"], {
+      encoding: "utf8",
+    }).trim(),
+    f.git("rev-parse", "HEAD"),
+  );
+});
+test("changing only pushurl invalidates an existing publish approval", async () => {
+  const f = await fixture(),
+    a = path.join(path.dirname(f.root), "a.git"),
+    b = path.join(path.dirname(f.root), "b.git");
+  for (const dir of [a, b]) execFileSync("git", ["init", "--bare", "-q", dir]);
+  f.git("remote", "add", "origin", a);
+  f.git("push", "-u", "origin", "HEAD:shared");
+  f.git("branch", "--set-upstream-to", "origin/shared");
+  const p = await repository.publishPlan(f);
+  f.git("remote", "set-url", "--push", "origin", b);
+  await assert.rejects(repository.publish(f, p.approval), /stale/i);
+});

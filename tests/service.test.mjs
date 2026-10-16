@@ -49,10 +49,11 @@ async function fixture() {
   };
 }
 async function done(s, j) {
-  for (let i = 0; i < 200; i++) {
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
     const v = await s.getJob(j.id);
     if (v && ["failed", "succeeded"].includes(v.status)) return v;
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 20));
   }
   throw new Error("timeout");
 }

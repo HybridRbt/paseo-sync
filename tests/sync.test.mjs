@@ -392,3 +392,73 @@ test("preview includes current and target versions and setting values for review
   assert.equal(p.changes[0].settings[0].before.values.previewWrap, false);
   assert.equal(p.changes[0].settings[0].after.values.previewWrap, true);
 });
+
+test("restore failures persist final observed state and backup ID, permitting a reviewed retry", async (t) => {
+  const f = await fixture(t, { installed: true });
+  await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
+  const applied = await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval),
+    p = await restorePlan(f.ctx, applied.backupId),
+    act = f.adapter.act;
+  f.adapter.act = async (a, id) => {
+    if (a === "enable") throw new Error("restore enable failure");
+    return act(a, id);
+  };
+  await assert.rejects(
+    restore(f.ctx, applied.backupId, p.approval),
+    (e) => e.backupId === applied.backupId,
+  );
+  const b = JSON.parse(
+    await readFile(
+      path.join(f.state, "backups", applied.backupId + ".json"),
+      "utf8",
+    ),
+  );
+  assert.equal(b.status, "restore-failed");
+  assert.ok(b.error);
+  f.adapter.act = act;
+  const next = await restorePlan(f.ctx, applied.backupId);
+  assert.equal(next.currentChangedSinceBackup, false);
+  await restore(f.ctx, applied.backupId, next.approval);
+  assert.equal((await f.adapter.list())[0].enabled, true);
+});
+
+test("unrecorded Git source edits block update and fail configuration verification", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process");
+  const row = (await f.adapter.list())[0];
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", row.path, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = sha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha,
+    };
+    return rows;
+  };
+  await writeJson(f.setting, f.target);
+  await writeFile(path.join(row.path, "index.client.tsx"), "local work");
+  assert.equal((await verify(f.ctx)).configurationMatches, false);
+  f.manifest.plugins[0].revision = "a".repeat(40);
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const p = await buildPlan(f.ctx);
+  assert.ok(
+    p.conflicts.some((x) => /source.*(edit|dirty)|local.*source/i.test(x)),
+  );
+  await assert.rejects(applyPlan(f.ctx,p.approval),/source/i);
+  assert.deepEqual(f.calls, []);
+});

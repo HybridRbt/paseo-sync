@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { devNull } from "node:os";
 const exec = promisify(execFile);
-export async function git(root, ...args) {
+export async function gitRaw(root, ...args) {
   try {
     return (
       await exec(
@@ -29,10 +29,14 @@ export async function git(root, ...args) {
           windowsHide: true,
         },
       )
-    ).stdout.trim();
+    ).stdout;
   } catch (e) {
     throw new Error(
       `Git ${args[0]} failed (${e.code ?? "error"}). Check repository state and noninteractive host credentials.`,
     );
   }
+}
+
+export async function git(root, ...args) {
+  return (await gitRaw(root, ...args)).trim();
 }
