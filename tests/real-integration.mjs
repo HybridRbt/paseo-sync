@@ -88,6 +88,12 @@ try {
     },
   });
   assert.equal(saved.status, "saved");
+  const discovered = await rpc("sync.discover", { checkout: repo });
+  assert.equal(discovered.selected.checkout, repo);
+  assert.equal(discovered.selected.repositoryUrl, null);
+  console.log(
+    "PASS: real discovery RPC finds saved profile without requiring an origin URL",
+  );
   async function operation(input) {
     const j = await rpc("sync.start", input);
     for (let i = 0; i < 120; i++) {

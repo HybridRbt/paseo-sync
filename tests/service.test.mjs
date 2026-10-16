@@ -96,3 +96,21 @@ test("polling an existing job reuses the validated connection instead of spawnin
   await s.getJob(job.id);
   assert.equal(calls, 1);
 });
+
+test("discovery reads saved repository without a working CLI and remembers successful repositories", async () => {
+  const f = { ...(await fixture()), discoveryRoots: [] },
+    s = service.createService(f);
+  const first = await s.discover({});
+  assert.equal(
+    first.selected.checkout,
+    await (await import("node:fs/promises")).realpath(f.settings.checkout),
+  );
+  await done(s, await s.start({ kind: "plan" }));
+  const root = first.selected.checkout;
+  f.settings.checkout = "";
+  f.adapter.status = async () => {
+    throw new Error("CLI unavailable");
+  };
+  const found = await s.discover({});
+  assert.ok(found.candidates.some((c) => c.checkout === root));
+});

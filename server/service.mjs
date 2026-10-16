@@ -30,6 +30,11 @@ import {
 } from "./core/repository.mjs";
 import { JobManager } from "./jobs.mjs";
 import { belongsToDaemon } from "./core/daemon-identity.mjs";
+import {
+  discoverRepositories,
+  rememberRepository,
+  syncStateRoot,
+} from "./discovery.mjs";
 const mutations = new Set(["apply", "publish", "cafe", "restore"]);
 export function createService({
   readSettings,
@@ -37,8 +42,13 @@ export function createService({
   stateRoot,
   adapterFactory = makeAdapter,
   getParent = undefined,
+  discoveryRoots = undefined,
 }) {
   let cached = null;
+  const historyFile = path.join(
+    stateRoot ?? syncStateRoot(),
+    "connections.json",
+  );
   async function connection(fresh = true) {
     const s = await readSettings();
     const key = objectHash(s);
@@ -110,6 +120,7 @@ export function createService({
         /* Unrelated plugin paths cannot authorize self management. */
       }
     }
+    await rememberRepository(historyFile, root).catch(() => {});
     return {
       root,
       home: c.home,
@@ -288,6 +299,20 @@ export function createService({
     return applyPlan(ctx, p._innerApproval);
   }
   return {
+    async discover(input = {}) {
+      const s = await readSettings();
+      let home =
+        s.daemonHome ||
+        process.env.PASEO_HOME ||
+        path.join(os.homedir(), ".paseo");
+      home = await realpath(home).catch(() => path.resolve(home));
+      return discoverRepositories({
+        checkout: input.checkout ?? s.checkout,
+        daemonHome: home,
+        historyFile,
+        ...(discoveryRoots ? { roots: discoveryRoots } : {}),
+      });
+    },
     async start(input) {
       if (mutations.has(input.kind) && !input.approval)
         throw new Error("Approval digest is required");

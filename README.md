@@ -11,20 +11,28 @@ Paseo 原生插件，通过你自己的 Git 仓库同步插件固定版本、启
 在每台 daemon 主机执行：
 
 ```sh
-paseo plugin install git:https://github.com/HybridRbt/paseo-sync --ref v0.1.0
+paseo plugin install git:https://github.com/HybridRbt/paseo-sync --ref v0.1.1
 ```
 
 也可以克隆本仓库，然后用 `paseo plugin install <代码仓库绝对路径>` 本地开发安装。无运行时 npm 依赖或构建脚本。
 
 打开侧栏的 **Paseo Sync**，或插件的设置页：
 
-1. 配置个人配置仓库的本机绝对路径。尚未克隆时同时填写 HTTPS 或 SSH 仓库 URL，凭据由主机的 Git credential helper / SSH agent 管理。
+1. 页面先识别已保存路径，再查找历史路径和常见开发目录。唯一候选自动展示路径及 Git `origin` URL，多个候选需选择；未找到时输入本机绝对路径。支持“更改”和“重新查找”。尚未克隆时填写目标路径及 HTTPS 或 SSH 仓库 URL，凭据由主机的 Git credential helper / SSH agent 管理。
 2. 保存设置，点击“初始化或拉取仓库”。仅允许干净工作区和快进更新；冲突保留现场。已有配置仓库可直接使用，不需要从本公开仓库复制个人文件。
 3. 检查主机环境。如果 CLI 不在 GUI daemon 的 PATH，填写 CLI 绝对路径。自定义 daemon home 也需填写；插件会验证进程所属关系，拒绝操作其他 daemon。
 4. 先预览并确认 Cafe 自动更新排除项，再预览并确认同步配置。
 5. 修改本机配置后，用“发布本机配置”检查文件差异，确认后提交并推送到预览中显示的实际 push URL；多个推送地址会拒绝。Git 作者身份及认证需提前在主机配置。
 
 新仓库没有 `profile.json` 时，可以先预览发布本机配置来生成第一份清单。仓库需要已有初始提交；本地目录安装和无法追溯来源的第三方插件不能导出。同控制器的目录安装会被排除。
+
+## 自动识别与界面语言
+
+查找在当前 daemon 主机执行，读取有效 `profile.json` 和 Git 仓库根目录；不联网、不克隆、不自动保存设置。已保存且有效的路径优先；其他查找最多访问 1500 个目录、向下 6 层，并在循环中检查 3 秒预算。`Documents`、`Projects`、`projects`、`Developer`、`src` 和用户目录下的 `paseo-profile` 为默认起点，跳过符号链接、隐藏及常见生成目录；未覆盖的目录可手动输入。达到搜索限制时不自动选择候选。Git 本地子命令使用独立超时，因此 3 秒不是整个 RPC 的硬超时。
+
+成功使用过的配置路径最多保留 20 项，在状态根目录 `connections.json` 保存。识别时读取 `origin` 的 fetch URL；push URL 不同时另外显示。带凭据、查询参数或不支持格式的 URL 不会返回界面。自动填充后点击“保存”，才更新 host 设置；不会自动应用同步差异。
+
+界面支持中文和 English，切换立即生效。Paseo 0.11.4 插件 SDK 尚未公开当前客户端的界面语言，因此本版显示手动选择，不宣称已跟随宿主。浏览器或桌面客户端允许访问 localStorage 时选择保存在当前客户端；无法访问时仅保留至当前客户端会话结束，不写入 daemon 的共享设置。默认中文。路径、URL、原始错误和技术 JSON 不翻译。
 
 ## 支持范围
 
