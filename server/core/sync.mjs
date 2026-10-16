@@ -91,7 +91,7 @@ async function capture(ctx, profile) {
 }
 const parsed = (raw) =>
   raw === null ? null : JSON.parse(Buffer.from(raw, "base64").toString("utf8"));
-function comparable(s) {
+function comparable(s, includeSource = true) {
   return {
     pluginsEnabled: s.pluginsEnabled,
     plugins: Object.fromEntries(
@@ -101,7 +101,7 @@ function comparable(s) {
           ? {
               descriptor: pluginIdentity(v.descriptor),
               status: v.status,
-              sourceState: v.sourceState ?? null,
+              ...(includeSource ? { sourceState: v.sourceState ?? null } : {}),
             }
           : null,
       ]),
@@ -270,6 +270,10 @@ async function saveBaseline(ctx, current, profile) {
 }
 export async function captureBaseline(ctx, profile) {
   const current = await capture(ctx, profile);
+  if (
+    Object.values(current.plugins).some((p) => p?.sourceState?.clean === false)
+  )
+    throw new Error("Local source changed while preparing publish");
   for (const p of profile.manifest.plugins)
     if (
       !same(
@@ -467,6 +471,11 @@ export async function restorePlan(ctx, id) {
   if (!b || b.schemaVersion !== 1 || b.home !== path.resolve(ctx.home))
     throw new Error("Backup is missing or belongs to another Paseo home");
   const current = await capture(ctx, b.profile);
+  const includesSourceMetadata =
+    b.after !== null &&
+    Object.values(b.after.plugins)
+      .filter(Boolean)
+      .every((p) => Object.hasOwn(p, "sourceState"));
   const conflicts = [];
   if (b.after === null || b.status === "pending" || b.status === "restoring")
     conflicts.push(
@@ -503,7 +512,11 @@ export async function restorePlan(ctx, id) {
     approval: objectHash({ backup: b, current: comparable(current) }),
     conflicts,
     currentChangedSinceBackup:
-      b.after !== null && !same(comparable(current), comparable(b.after)),
+      b.after !== null &&
+      !same(
+        comparable(current, includesSourceMetadata),
+        comparable(b.after, includesSourceMetadata),
+      ),
     warnings: [
       "Restore may reinstall previous pinned versions using the network. New plugins are disabled and retained to preserve their data.",
     ],

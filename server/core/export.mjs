@@ -72,7 +72,16 @@ export async function exportProfile(ctx) {
     if (
       row.installation?.identity.kind === "git" &&
       row.path &&
-      (await git(row.path, "status", "--porcelain", "--untracked-files=no"))
+      (await git(row.path, "rev-parse", "HEAD")) !==
+        row.installation.currentRevision
+    )
+      throw new Error(
+        `Git plugin HEAD differs from installation revision: ${row.id}. Update provenance before exporting.`,
+      );
+    if (
+      row.installation?.identity.kind === "git" &&
+      row.path &&
+      (await git(row.path, "status", "--porcelain", "--untracked-files=all"))
     )
       throw new Error(
         `Git plugin has local source changes: ${row.id}. Commit a portable source revision first.`,

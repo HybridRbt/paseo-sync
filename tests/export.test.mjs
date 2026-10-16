@@ -184,3 +184,43 @@ test("export refuses unapplied additions, deletions and missing settings against
     );
   }
 });
+test("export refuses a committed Git HEAD that differs from installation provenance", async () => {
+  const ctx = await fixture(),
+    dir = path.join(ctx.home, "source");
+  await mkdir(dir);
+  const git = (...a) =>
+    execFileSync("git", ["-c", "core.fsmonitor=false", "-C", dir, ...a], {
+      encoding: "utf8",
+    }).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  await writeFile(path.join(dir, "code.ts"), "one");
+  git("add", ".");
+  git("commit", "-qm", "one");
+  ctx.rows[0].path = dir;
+  ctx.rows[0].installation.currentRevision = git("rev-parse", "HEAD");
+  await writeFile(path.join(dir, "code.ts"), "two");
+  git("commit", "-qam", "two");
+  await assert.rejects(exportProfile(ctx), /HEAD|revision|provenance/i);
+  await assert.rejects(readFile(path.join(ctx.root, "profile.json")));
+});
+test("export refuses untracked Git runtime files as unrecorded local source", async () => {
+  const ctx = await fixture(),
+    dir = path.join(ctx.home, "source");
+  await mkdir(dir);
+  const git = (...a) =>
+    execFileSync("git", ["-c", "core.fsmonitor=false", "-C", dir, ...a], {
+      encoding: "utf8",
+    }).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  await writeFile(path.join(dir, "code.ts"), "one");
+  git("add", ".");
+  git("commit", "-qm", "one");
+  ctx.rows[0].path = dir;
+  ctx.rows[0].installation.currentRevision = git("rev-parse", "HEAD");
+  await writeFile(path.join(dir, "extra.ts"), "local");
+  await assert.rejects(exportProfile(ctx), /local source|untracked|changes/i);
+});

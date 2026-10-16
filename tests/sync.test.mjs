@@ -459,6 +459,46 @@ test("unrecorded Git source edits block update and fail configuration verificati
   assert.ok(
     p.conflicts.some((x) => /source.*(edit|dirty)|local.*source/i.test(x)),
   );
-  await assert.rejects(applyPlan(f.ctx,p.approval),/source/i);
+  await assert.rejects(applyPlan(f.ctx, p.approval), /source/i);
   assert.deepEqual(f.calls, []);
+});
+test("legacy schema v1 backups without Git source metadata remain restorable when source is clean", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process"),
+    row = (await f.adapter.list())[0];
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", row.path, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = sha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha,
+    };
+    return rows;
+  };
+  const p = await buildPlan(f.ctx),
+    r = await applyPlan(f.ctx, p.approval),
+    file = path.join(f.state, "backups", r.backupId + ".json"),
+    b = JSON.parse(await readFile(file, "utf8"));
+  for (const state of [b.before, b.after])
+    for (const plugin of Object.values(state.plugins))
+      if (plugin) delete plugin.sourceState;
+  await writeJson(file, b);
+  const preview = await restorePlan(f.ctx, r.backupId);
+  assert.equal(preview.currentChangedSinceBackup, false);
+  await restore(f.ctx, r.backupId, preview.approval);
 });
