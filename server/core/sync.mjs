@@ -1,0 +1,218 @@
+import { randomUUID } from 'node:crypto';
+import { readFile, mkdir, rm, lstat } from 'node:fs/promises';
+import path from 'node:path';
+import { safeFile, bytesOrNull, jsonOrNull, digest, objectHash, same, atomicWrite, writeJson, privateRoot } from './files.mjs';
+import { loadProfile, snapshotPlugin, pluginIdentity, patchText, validateSettings } from './profile.mjs';
+
+function baseState(s) {
+  return {plugins:Object.fromEntries(Object.entries(s.plugins).map(([id,p])=>[id,p?.descriptor ?? null])),settings:s.settings,patches:s.patches};
+}
+async function settingsFile(ctx,s) {return safeFile(ctx.home,`plugin-settings/${s.plugin}/${s.document}.json`);}
+async function installedFile(ctx,row,name) {
+  if(!path.isAbsolute(row.path)) throw new Error('Installed plugin path must be absolute');
+  const relative=path.relative(ctx.home,row.path);
+  if(relative.startsWith('..') || path.isAbsolute(relative) || !relative.split(path.sep).includes('plugins')) throw new Error(`Plugin path is outside local managed installations: ${row.id}`);
+  return safeFile(ctx.home,`${relative.split(path.sep).join('/')}/${name}`);
+}
+async function capture(ctx,profile) {
+  const rows=await ctx.adapter.list();const byId=new Map(rows.map(r=>[r.id,r]));
+  const config=await jsonOrNull(await safeFile(ctx.home,'config.json'));
+  const plugins={},settings={},patches={};
+  for(const p of profile.manifest.plugins){
+    const row=byId.get(p.id);
+    plugins[p.id]=row?{descriptor:snapshotPlugin(row),path:row.path,status:row.status}:null;
+  }
+  for(const s of profile.settings){
+    const raw=await bytesOrNull(await settingsFile(ctx,s));
+    if(raw!==null)validateSettings(s.plugin,s.document,JSON.parse(raw.toString('utf8')));
+    settings[s.file]=raw===null?null:raw.toString('base64');
+  }
+  for(const bundle of profile.patches){
+    const row=byId.get(bundle.plugin);
+    for(const file of bundle.data.files){
+      const raw=row?await bytesOrNull(await installedFile(ctx,row,file.path)):null;
+      patches[`${bundle.plugin}/${file.path}`]=raw===null?null:raw.toString('base64');
+    }
+  }
+  return {pluginsEnabled:config?.pluginsEnabled===true,plugins,settings,patches};
+}
+const parsed = raw => raw===null?null:JSON.parse(Buffer.from(raw,'base64').toString('utf8'));
+function comparable(s) {
+  return {pluginsEnabled:s.pluginsEnabled,plugins:Object.fromEntries(Object.entries(s.plugins).map(([k,v])=>[k,v?{descriptor:pluginIdentity(v.descriptor),status:v.status}:null])),settings:s.settings,patches:s.patches};
+}
+async function baseline(ctx) {return jsonOrNull(await safeFile(ctx.state,'baseline.json'));}
+async function planData(ctx) {
+  await privateRoot(ctx.state);
+  const profile=await loadProfile(ctx.root),current=await capture(ctx,profile),previous=await baseline(ctx);
+  const conflicts=[],changes=[];
+  if(!current.pluginsEnabled)conflicts.push('pluginsEnabled is off; enable it explicitly in Paseo before applying.');
+  const localConflict=(label,now,old,wanted)=>{
+    if(previous && old!==undefined && !same(now,old) && !same(now,wanted) && !ctx.preferProfile)conflicts.push(`Local changes conflict with profile: ${label}. Export local changes or review --prefer-profile.`);
+  };
+  for(const target of profile.manifest.plugins){
+    const currentPlugin=current.plugins[target.id],now=currentPlugin?.descriptor ?? null;
+    const actions=[];
+    const sameVersion=now && same({...pluginIdentity(now),enabled:target.enabled},pluginIdentity(target));
+    localConflict(target.id,pluginIdentity(now),previous?.plugins?.[target.id]===undefined?undefined:pluginIdentity(previous.plugins[target.id]),pluginIdentity(target));
+    if(!sameVersion)actions.push('install');
+    if(!sameVersion&&!target.enabled)conflicts.push(`Cannot install disabled target ${target.id}: Paseo install immediately enables code. Review installation separately; this tool will not briefly activate it.`);
+    const bundle=profile.patches.find(x=>x.plugin===target.id);
+    if(bundle){
+      let needsPatch=!sameVersion;
+      for(const f of bundle.data.files){
+        const raw=current.patches[`${target.id}/${f.path}`];
+        if(sameVersion){
+          if(raw===null)throw new Error(`Patch target changed or missing: ${target.id}/${f.path}`);
+          const bytes=Buffer.from(raw,'base64');patchText(bytes,f);
+          if(digest(bytes)!==f.afterSha256)needsPatch=true;
+        }
+      }
+      if(needsPatch)actions.push('patch');
+    }
+    for(const s of profile.settings.filter(x=>x.plugin===target.id)){
+      const nowValue=parsed(current.settings[s.file]);
+      localConflict(s.file,nowValue,previous?.settings?.[s.file]===undefined?undefined:parsed(previous.settings[s.file]),s.data);
+      if(!same(nowValue,s.data))actions.push(`settings:${s.document}`);
+    }
+    if(now && now.enabled!==target.enabled)actions.push(target.enabled?'enable':'disable');
+    if(now && target.enabled && currentPlugin.status!=='running' && actions.length===0)actions.push('reload');
+    if(actions.length)changes.push({plugin:target.id,actions});
+  }
+  const approval=objectHash({profile:profile.hash,current:comparable(current),previous,preferProfile:!!ctx.preferProfile});
+  const plan={schemaVersion:1,profileHash:profile.hash,approval,preferProfile:!!ctx.preferProfile,changes,conflicts,
+    warnings:['Plugin state here is daemon state; verify client UI after first install.','Linear and GitHub credentials are local; functional sign-in is not certified by configuration verification.']};
+  return {plan,profile,current,previous};
+}
+export async function buildPlan(ctx) {return (await planData(ctx)).plan;}
+async function saveBaseline(ctx,current,profile) {
+  await writeJson(await safeFile(ctx.state,'baseline.json'),{schemaVersion:1,profileHash:profile.hash,...baseState(current)});
+}
+export async function verify(ctx) {
+  const profile=await loadProfile(ctx.root),current=await capture(ctx,profile);const differences=[],runtime=[];
+  for(const p of profile.manifest.plugins){
+    const c=current.plugins[p.id];if(!same(pluginIdentity(c?.descriptor),pluginIdentity(p)))differences.push(`plugin:${p.id}`);
+    if(p.enabled && c?.status!=='running')runtime.push({plugin:p.id,status:c?.status??'missing'});
+  }
+  for(const s of profile.settings)if(!same(parsed(current.settings[s.file]),s.data))differences.push(s.file);
+  for(const b of profile.patches)for(const f of b.data.files){const raw=current.patches[`${b.plugin}/${f.path}`];if(raw===null||digest(Buffer.from(raw,'base64'))!==f.afterSha256)differences.push(`patch:${b.plugin}/${f.path}`);}
+  if(!current.pluginsEnabled)runtime.push({plugin:'*',status:'pluginsEnabled=false'});
+  return {configurationMatches:differences.length===0,runtimeHealthy:runtime.length===0,differences,runtime,credentialsVerified:false,clientUiVerified:false};
+}
+async function backupFile(ctx,id){if(!/^[a-f0-9-]{36}$/.test(id))throw new Error('Invalid backup ID');return safeFile(ctx.state,`backups/${id}.json`);}
+export async function applyPlan(ctx,approval) {
+  await privateRoot(ctx.state);
+  const lock=await safeFile(ctx.state,'operation.lock');
+  try{await mkdir(lock);}catch(e){if(e.code==='EEXIST')throw new Error(`Another operation is active, or a stale lock needs review: ${lock}`);throw e;}
+  let backup=null,filename=null;
+  try{
+    const data=await planData(ctx);const {plan,profile,current,previous}=data;
+    if(approval!==plan.approval)throw new Error('Plan is stale. Run plan again and review its differences.');
+    if(plan.conflicts.length)throw new Error(plan.conflicts.join('\n'));
+    if(plan.changes.length===0){await saveBaseline(ctx,current,profile);return {changed:false,backupId:null,verification:await verify(ctx)};}
+    const id=randomUUID();filename=await backupFile(ctx,id);
+    backup={schemaVersion:1,id,home:path.resolve(ctx.home),profile,before:current,previous,status:'pending',after:null};
+    await writeJson(filename,backup);
+    for(const change of plan.changes){
+      const id=change.plugin,target=profile.manifest.plugins.find(x=>x.id===id),before=current.plugins[id];
+      const affectedSettings=profile.settings.filter(s=>s.plugin===id),bundle=profile.patches.find(x=>x.plugin===id);
+      if(before?.descriptor.enabled)await ctx.adapter.act('disable',id);
+      // A client may have saved while disable was in flight. Compare exact bytes.
+      for(const s of affectedSettings){const raw=await bytesOrNull(await settingsFile(ctx,s));if((raw===null?null:raw.toString('base64'))!==current.settings[s.file])throw new Error(`Settings changed concurrently while stopping ${id}`);}
+      if(change.actions.includes('install')){
+        await ctx.adapter.install(target);
+        const row=(await ctx.adapter.list()).find(x=>x.id===id);if(!row)throw new Error(`Install returned no plugin: ${id}`);
+        if(row.enabled)await ctx.adapter.act('disable',id);
+      }
+      const row=(await ctx.adapter.list()).find(x=>x.id===id);
+      if(!row)throw new Error(`Missing plugin after install: ${id}`);
+      const installed=snapshotPlugin(row);
+      if(!same({...pluginIdentity(installed),enabled:target.enabled},pluginIdentity(target)))throw new Error(`Installed revision/source mismatch: ${id}`);
+      if(bundle){
+        const writes=[];
+        for(const f of bundle.data.files){const file=await installedFile(ctx,row,f.path),raw=await readFile(file);writes.push({file,raw,next:patchText(raw,f)});}
+        for(const w of writes)if(!w.raw.equals(w.next))await atomicWrite(w.file,w.next);
+      }
+      for(const s of affectedSettings){
+        const file=await settingsFile(ctx,s),raw=await bytesOrNull(file);
+        // Installation may recreate defaults. Preserve the original check for same-version changes.
+        if(!change.actions.includes('install') && (raw===null?null:raw.toString('base64'))!==current.settings[s.file])throw new Error(`Settings changed concurrently before write: ${s.file}`);
+        if(!same(raw===null?null:JSON.parse(raw.toString('utf8')),s.data))await writeJson(file,s.data);
+      }
+      if(target.enabled)await ctx.adapter.act('enable',id);
+    }
+    const verification=await verify(ctx);backup.after=await capture(ctx,profile);
+    if(!verification.configurationMatches || !verification.runtimeHealthy)throw new Error(`Verification failed: ${JSON.stringify(verification)}`);
+    backup.status='complete';await writeJson(filename,backup);await saveBaseline(ctx,backup.after,profile);
+    return {changed:true,backupId:backup.id,backupFile:filename,verification};
+  }catch(error){
+    if(backup){
+      backup.status='failed';backup.error=error.message;
+      try{backup.after=await capture(ctx,backup.profile);}catch{backup.after=null;}
+      await writeJson(filename,backup);error.backupId=backup.id;error.backupFile=filename;
+    }
+    throw error;
+  }finally{await rm(lock,{recursive:true,force:true});}
+}
+export async function restorePlan(ctx,id) {
+  const b=await jsonOrNull(await backupFile(ctx,id));
+  if(!b || b.schemaVersion!==1 || b.home!==path.resolve(ctx.home))throw new Error('Backup is missing or belongs to another Paseo home');
+  const current=await capture(ctx,b.profile);
+  const conflicts=[];
+  for(const [plugin,before] of Object.entries(b.before.plugins)){
+    const now=current.plugins[plugin];
+    if(before&&!before.descriptor.enabled&&(!now||!same({...pluginIdentity(now.descriptor),enabled:false},pluginIdentity(before.descriptor))))conflicts.push(`Cannot reinstall previously disabled plugin ${plugin}: Paseo install immediately enables code.`);
+  }
+  return {backupId:id,approval:objectHash({backup:b,current:comparable(current)}),conflicts,currentChangedSinceBackup:b.after!==null&&!same(comparable(current),comparable(b.after)),
+    warnings:['Restore may reinstall previous pinned versions using the network. New plugins are disabled and retained to preserve their data.'],_backup:b,_current:current};
+}
+export async function restore(ctx,id,approval) {
+  await privateRoot(ctx.state);
+  const lock=await safeFile(ctx.state,'operation.lock');try{await mkdir(lock);}catch{throw new Error('Another operation is active, or a stale lock needs review.');}
+  try{
+    const preview=await restorePlan(ctx,id);
+    if(preview.approval!==approval)throw new Error('Restore plan is stale');
+    if(preview.conflicts.length)throw new Error(preview.conflicts.join('\n'));
+    if(preview.currentChangedSinceBackup)throw new Error('Current managed data changed after the operation; resolve those changes before restoring.');
+    const b=preview._backup;
+    const assertCurrentSettings=async plugin=>{
+      for(const s of b.profile.settings.filter(x=>x.plugin===plugin)){
+        const raw=await bytesOrNull(await settingsFile(ctx,s));
+        if((raw===null?null:raw.toString('base64'))!==preview._current.settings[s.file])throw new Error(`Settings changed concurrently while restoring: ${s.file}`);
+      }
+    };
+    for(const target of b.profile.manifest.plugins){
+      const before=b.before.plugins[target.id];let row=(await ctx.adapter.list()).find(x=>x.id===target.id);
+      if(row?.enabled)await ctx.adapter.act('disable',target.id);
+      await assertCurrentSettings(target.id);
+      if(!before){
+        for(const s of b.profile.settings.filter(x=>x.plugin===target.id)){
+          await assertCurrentSettings(target.id);
+          const file=await settingsFile(ctx,s),raw=b.before.settings[s.file];
+          if(raw===null)await rm(file,{force:true});else await atomicWrite(file,Buffer.from(raw,'base64'));
+        }
+        continue;
+      }
+      if(!row || !same({...pluginIdentity(snapshotPlugin(row)),enabled:before.descriptor.enabled},pluginIdentity(before.descriptor))){
+        await ctx.adapter.install(before.descriptor);row=(await ctx.adapter.list()).find(x=>x.id===target.id);if(row?.enabled)await ctx.adapter.act('disable',target.id);
+        await assertCurrentSettings(target.id);
+      }
+      for(const bundle of b.profile.patches.filter(x=>x.plugin===target.id))for(const f of bundle.data.files){
+        const raw=b.before.patches[`${target.id}/${f.path}`];if(raw!==null)await atomicWrite(await installedFile(ctx,row,f.path),Buffer.from(raw,'base64'));
+      }
+      for(const s of b.profile.settings.filter(x=>x.plugin===target.id)){
+        await assertCurrentSettings(target.id);
+        const file=await settingsFile(ctx,s),raw=b.before.settings[s.file];if(raw===null)await rm(file,{force:true});else await atomicWrite(file,Buffer.from(raw,'base64'));
+      }
+      if(before.descriptor.enabled)await ctx.adapter.act('enable',target.id);
+    }
+    const restored=await capture(ctx,b.profile);
+    for(const p of b.profile.manifest.plugins)if(b.before.plugins[p.id]){
+      if(!same(pluginIdentity(restored.plugins[p.id]?.descriptor),pluginIdentity(b.before.plugins[p.id].descriptor)))throw new Error(`Restore verification failed: ${p.id}`);
+      for(const s of b.profile.settings.filter(x=>x.plugin===p.id))if(restored.settings[s.file]!==b.before.settings[s.file])throw new Error(`Restore settings mismatch: ${s.file}`);
+      for(const bundle of b.profile.patches.filter(x=>x.plugin===p.id))for(const f of bundle.data.files){const key=`${p.id}/${f.path}`;if(b.before.patches[key]!==null&&restored.patches[key]!==b.before.patches[key])throw new Error(`Restore patch mismatch: ${key}`);}
+    }
+    if(b.previous)await writeJson(await safeFile(ctx.state,'baseline.json'),b.previous);else await rm(await safeFile(ctx.state,'baseline.json'),{force:true});
+    b.status='restored';b.after=restored;await writeJson(await backupFile(ctx,id),b);
+    return {restored:true,backupId:id,retainedDisabledPlugins:b.profile.manifest.plugins.filter(p=>!b.before.plugins[p.id]).map(p=>p.id)};
+  }finally{await rm(lock,{recursive:true,force:true});}
+}
