@@ -224,3 +224,68 @@ test("export refuses untracked Git runtime files as unrecorded local source", as
   await writeFile(path.join(dir, "extra.ts"), "local");
   await assert.rejects(exportProfile(ctx), /local source|untracked|changes/i);
 });
+
+test("after syncing an absent disabled plugin export preserves its intent, settings and patch without reading orphan data", async () => {
+  const ctx = await fixture();
+  ctx.rows.length = 0;
+  const disabled = {
+    id: "better-paseo",
+    source: "npm:better-paseo",
+    revision: "1.0.0",
+    enabled: false,
+  };
+  const file = "settings/better-paseo/presentation.json";
+  const setting = { version: 1, values: { previewWrap: false } };
+  await writeJson(path.join(ctx.root, file), setting);
+  const { digest } = await import("../server/core/files.mjs");
+  const patchFile = "patches/disabled.json";
+  await writeJson(path.join(ctx.root, patchFile), {
+    schemaVersion: 1,
+    plugin: disabled.id,
+    revision: disabled.revision,
+    files: [
+      {
+        path: "index.client.tsx",
+        beforeSha256: digest("old"),
+        afterSha256: digest("new"),
+        find: "old",
+        replace: "new",
+        count: 1,
+      },
+    ],
+  });
+  const manifest = {
+    schemaVersion: 1,
+    plugins: [disabled],
+    settings: [{ plugin: disabled.id, document: "presentation", file }],
+    patches: [{ plugin: disabled.id, file: patchFile }],
+  };
+  await writeJson(path.join(ctx.root, "profile.json"), manifest);
+  for (const args of [
+    ["config", "user.name", "Test"],
+    ["config", "user.email", "test@example.invalid"],
+    ["add", "."],
+    ["commit", "-qm", "profile"],
+  ])
+    execFileSync("git", ["-C", ctx.root, ...args], { stdio: "pipe" });
+  const { buildPlan, applyPlan, captureBaseline } = await import(
+    "../server/core/sync.mjs"
+  );
+  const { loadProfile } = await import("../server/core/profile.mjs");
+  const p = await buildPlan(ctx);
+  await applyPlan(ctx, p.approval);
+  await writeFile(
+    path.join(ctx.home, "plugin-settings/better-paseo/presentation.json"),
+    "unmanaged invalid orphan JSON",
+  );
+  await exportProfile(ctx);
+  assert.deepEqual(
+    JSON.parse(await readFile(path.join(ctx.root, "profile.json"), "utf8")),
+    manifest,
+  );
+  assert.deepEqual(
+    JSON.parse(await readFile(path.join(ctx.root, file), "utf8")),
+    setting,
+  );
+  await captureBaseline(ctx, await loadProfile(ctx.root));
+});

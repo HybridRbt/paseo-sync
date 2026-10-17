@@ -65,9 +65,21 @@ export async function exportProfile(ctx) {
       row.id !== ctx.selfId &&
       !ctx.selfIds?.includes(row.id),
   );
-  const plugins = rows
-    .map(snapshotPlugin)
-    .sort((a, b) => a.id.localeCompare(b.id));
+  // Preserve disabled intent accepted by synchronization on a host where the
+  // plugin is absent. Exporting another host change must not delete this intent.
+  const retained =
+    loaded?.manifest.plugins.filter(
+      (p) =>
+        !p.enabled &&
+        !rows.some((r) => r.id === p.id) &&
+        p.id !== "paseo-sync" &&
+        p.id !== ctx.selfId &&
+        !ctx.selfIds?.includes(p.id),
+    ) ?? [];
+  const retainedIds = new Set(retained.map((p) => p.id));
+  const plugins = [...rows.map(snapshotPlugin), ...retained].sort((a, b) =>
+    a.id.localeCompare(b.id),
+  );
   for (const row of rows) {
     if (
       row.installation?.identity.kind === "git" &&
@@ -108,7 +120,7 @@ export async function exportProfile(ctx) {
     }
   }
   const settings = [];
-  if (plugins.some((p) => p.id === "better-paseo")) {
+  if (rows.some((p) => p.id === "better-paseo")) {
     const file = "settings/better-paseo/presentation.json";
     const data = await jsonOrNull(await safeFile(ctx.home, "plugin-" + file));
     if (data !== null) {
@@ -121,6 +133,9 @@ export async function exportProfile(ctx) {
       });
     }
   }
+  settings.push(
+    ...(loaded?.settings.filter((s) => retainedIds.has(s.plugin)) ?? []),
+  );
   if (loaded && previous) {
     const names = new Set([
       ...loaded.settings.map((s) => s.file),
@@ -153,6 +168,10 @@ export async function exportProfile(ctx) {
       file: "patches/github-board-0.10.2-icons.json",
     });
   for (const entry of candidates) {
+    if (retainedIds.has(entry.plugin)) {
+      patches.push(entry);
+      continue;
+    }
     const target = plugins.find((p) => p.id === entry.plugin);
     if (!target) continue;
     const data = validatePatch(

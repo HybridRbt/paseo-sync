@@ -128,6 +128,8 @@ try {
     settings: [],
     patches: [],
   });
+  await exec("git", ["-C", repo, "add", "profile.json"]);
+  await exec("git", ["-C", repo, "commit", "-qm", "track disabled target"]);
   const skipPreview = await operation({ kind: "plan" });
   assert.deepEqual(skipPreview.conflicts, []);
   assert.deepEqual(skipPreview.changes, []);
@@ -140,12 +142,16 @@ try {
   });
   assert.equal(skippedApply.verification.configurationMatches, true);
   assert.ok(!(await adapter.list()).some((p) => p.id === "firstmate"));
+  const skippedPublish = await operation({ kind: "publishPlan" });
+  assert.equal(skippedPublish.files.length, 0);
   await writeJson(path.join(repo, "profile.json"), {
     schemaVersion: 1,
     plugins: [],
     settings: [],
     patches: [],
   });
+  await exec("git", ["-C", repo, "add", "profile.json"]);
+  await exec("git", ["-C", repo, "commit", "-qm", "reset integration profile"]);
   const resetPlan = await operation({ kind: "plan" });
   await operation({ kind: "apply", approval: resetPlan.approval });
   console.log(

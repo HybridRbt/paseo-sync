@@ -32,6 +32,43 @@ function skipMissingDisabled(ctx, current, target) {
     !ctx.selfIds?.includes(target.id)
   );
 }
+// A skipped target is outside this operation's recovery scope, even if another
+// process changes or installs it while the other targets are being synchronized.
+function recoveryScope(profile, current, skipped) {
+  const ignored = new Set(skipped.map((s) => s.plugin));
+  const manifest = {
+    ...profile.manifest,
+    plugins: profile.manifest.plugins.filter((p) => !ignored.has(p.id)),
+    settings: profile.manifest.settings.filter((s) => !ignored.has(s.plugin)),
+    patches: profile.manifest.patches.filter((p) => !ignored.has(p.plugin)),
+  };
+  const settings = profile.settings.filter((s) => !ignored.has(s.plugin));
+  const patches = profile.patches.filter((p) => !ignored.has(p.plugin));
+  const activeProfile = {
+    manifest,
+    settings,
+    patches,
+    hash: objectHash({ manifest, settings, patches }),
+  };
+  const files = new Set(settings.map((s) => s.file));
+  return {
+    profile: activeProfile,
+    before: {
+      ...current,
+      plugins: Object.fromEntries(
+        Object.entries(current.plugins).filter(([id]) => !ignored.has(id)),
+      ),
+      settings: Object.fromEntries(
+        Object.entries(current.settings).filter(([file]) => files.has(file)),
+      ),
+      patches: Object.fromEntries(
+        Object.entries(current.patches).filter(
+          ([key]) => !ignored.has(key.split("/")[0]),
+        ),
+      ),
+    },
+  };
+}
 function baseState(s) {
   return {
     plugins: Object.fromEntries(
@@ -77,7 +114,18 @@ async function capture(ctx, profile) {
       : null;
   }
   for (const s of profile.settings) {
-    const raw = await bytesOrNull(await settingsFile(ctx, s));
+    const file = await settingsFile(ctx, s);
+    if (
+      skipMissingDisabled(
+        ctx,
+        { plugins },
+        profile.manifest.plugins.find((p) => p.id === s.plugin),
+      )
+    ) {
+      settings[s.file] = null;
+      continue;
+    }
+    const raw = await bytesOrNull(file);
     if (raw !== null)
       validateSettings(s.plugin, s.document, JSON.parse(raw.toString("utf8")));
     settings[s.file] = raw === null ? null : raw.toString("base64");
@@ -401,8 +449,8 @@ export async function applyPlan(ctx, approval) {
       schemaVersion: 1,
       id,
       home: path.resolve(ctx.home),
-      profile,
-      before: current,
+      ...recoveryScope(profile, current, plan.skipped),
+      skipped: plan.skipped,
       previous,
       status: "pending",
       after: null,
@@ -480,7 +528,7 @@ export async function applyPlan(ctx, approval) {
       if (target.enabled) await ctx.adapter.act("enable", id);
     }
     const verification = await verify(ctx);
-    backup.after = await capture(ctx, profile);
+    backup.after = await capture(ctx, backup.profile);
     if (!verification.configurationMatches || !verification.runtimeHealthy)
       throw new Error(`Verification failed: ${JSON.stringify(verification)}`);
     backup.status = "complete";

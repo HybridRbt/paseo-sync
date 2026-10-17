@@ -590,3 +590,65 @@ test("restore still refuses reinstalling a previously installed disabled plugin 
   );
   assert.deepEqual(f.calls, []);
 });
+
+test("skipped settings are not parsed and are excluded from mixed-operation backup and restore", async (t) => {
+  const f = await fixture(t);
+  f.plugin.enabled = false;
+  f.manifest.plugins.push({
+    id: "firstmate",
+    source: "npm:firstmate",
+    revision: "0.4.0",
+    enabled: true,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  await mkdir(path.dirname(f.setting), { recursive: true });
+  await writeFile(f.setting, "{invalid orphan JSON");
+  const p = await buildPlan(f.ctx);
+  assert.deepEqual(p.conflicts, []);
+  const original = f.adapter.install;
+  f.adapter.install = async (target) => {
+    await writeFile(f.setting, "external change during apply");
+    return original(target);
+  };
+  const result = await applyPlan(f.ctx, p.approval);
+  assert.equal(result.verification.configurationMatches, true);
+  const b = JSON.parse(await readFile(result.backupFile, "utf8"));
+  assert.deepEqual(
+    b.profile.manifest.plugins.map((p) => p.id),
+    ["firstmate"],
+  );
+  await writeFile(f.setting, "another external change after apply");
+  const undo = await restorePlan(f.ctx, result.backupId);
+  assert.deepEqual(undo.conflicts, []);
+  assert.equal(undo.currentChangedSinceBackup, false);
+  await restore(f.ctx, result.backupId, undo.approval);
+  assert.equal(
+    await readFile(f.setting, "utf8"),
+    "another external change after apply",
+  );
+});
+
+test("restore never rolls back external settings changes for a plugin skipped by the operation", async (t) => {
+  const f = await fixture(t);
+  f.plugin.enabled = false;
+  f.manifest.plugins.push({
+    id: "firstmate",
+    source: "npm:firstmate",
+    revision: "0.4.0",
+    enabled: true,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
+  const original = f.adapter.install;
+  const external = { version: 1, values: { previewWrap: true } };
+  f.adapter.install = async (target) => {
+    await writeJson(f.setting, external);
+    return original(target);
+  };
+  const p = await buildPlan(f.ctx),
+    r = await applyPlan(f.ctx, p.approval);
+  const undo = await restorePlan(f.ctx, r.backupId);
+  const restored = await restore(f.ctx, r.backupId, undo.approval);
+  assert.deepEqual(restored.retainedDisabledPlugins, ["firstmate"]);
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), external);
+});
