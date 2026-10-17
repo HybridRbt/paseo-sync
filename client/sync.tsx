@@ -156,9 +156,81 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
     ["cliPath", "Paseo CLI 绝对路径（留空自动查找）"],
     ["daemonHome", "Daemon home（留空使用主机默认）"],
   ] as const;
+  const progress = jobProgress(job);
+  const barColor =
+    job?.status === "failed"
+      ? theme.colors.statusDanger
+      : job?.status === "succeeded"
+        ? theme.colors.statusSuccess
+        : theme.colors.accent;
   return (
+    <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
+      {job || error ? (
+        <View
+          accessibilityRole="progressbar"
+          accessibilityValue={{ min: 0, max: 100, now: Math.round(progress * 100) }}
+          style={{
+            gap: 6,
+            paddingHorizontal: 20,
+            paddingVertical: 12,
+            backgroundColor: theme.colors.surface1,
+            borderBottomWidth: 1,
+            borderBottomColor: theme.colors.border,
+          }}
+        >
+          {job ? (
+            <>
+              <View
+                style={{
+                  flexDirection: "row",
+                  justifyContent: "space-between",
+                  gap: 8,
+                }}
+              >
+                <Text style={[text, { flexShrink: 1 }]}>
+                  {t("任务：")}
+                  {t(job.kind)} · {t(job.status)} {t(job.phase ?? "")}
+                </Text>
+                <Text style={muted}>{Math.round(progress * 100)}%</Text>
+              </View>
+              <View
+                style={{
+                  height: 4,
+                  borderRadius: 2,
+                  overflow: "hidden",
+                  backgroundColor: theme.colors.surface2,
+                }}
+              >
+                <View
+                  style={{
+                    height: "100%",
+                    width: `${progress * 100}%`,
+                    backgroundColor: barColor,
+                  }}
+                />
+              </View>
+              {job.error ? (
+                <Text selectable style={{ color: theme.colors.statusDanger }}>
+                  {job.error}
+                </Text>
+              ) : null}
+              {job.backupId ? (
+                <Text selectable style={text}>
+                  {t("备份：")}
+                  {job.backupId}
+                </Text>
+              ) : null}
+            </>
+          ) : null}
+          {error ? (
+            <Text selectable style={{ color: theme.colors.statusDanger }}>
+              {error}
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
     <ScrollView
-      style={{ flex: 1, backgroundColor: theme.colors.surface0 }}
+      style={{ flex: 1 }}
       contentContainerStyle={{ padding: 20, gap: 16 }}
     >
       <Text style={[text, { fontSize: 22, fontWeight: "600" }]}>
@@ -418,28 +490,8 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
           />
         </SettingsCard>
       </SettingsSection>
-      {error ? (
-        <Text selectable style={text}>
-          {error}
-        </Text>
-      ) : null}
-      {job ? (
+      {job && (result !== undefined || canConfirm) ? (
         <View style={{ gap: 8 }}>
-          <Text style={text}>
-            {t("任务：")}
-            {t(job.kind)} · {t(job.status)} {t(job.phase ?? "")}
-          </Text>
-          {job.error ? (
-            <Text selectable style={text}>
-              {job.error}
-            </Text>
-          ) : null}
-          {job.backupId ? (
-            <Text selectable style={text}>
-              {t("备份：")}
-              {job.backupId}
-            </Text>
-          ) : null}
           {result !== undefined ? (
             <>
               <ResultSummary
@@ -496,7 +548,23 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
         )}
       </Text>
     </ScrollView>
+    </View>
   );
+}
+
+// The server reports phases, not percentages: queued → checking → work → complete.
+const PHASE_PROGRESS: Record<string, number> = {
+  queued: 0.1,
+  checking: 0.3,
+  "git-fetch-and-fast-forward": 0.65,
+  preview: 0.65,
+  "backup-and-execute": 0.65,
+  complete: 1,
+};
+function jobProgress(job: Job | null): number {
+  if (!job) return 0;
+  if (job.status === "succeeded" || job.status === "failed") return 1;
+  return PHASE_PROGRESS[job.phase ?? ""] ?? 0.1;
 }
 
 function ResultSummary({
