@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile, rm, realpath } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
   windowsLaunch,
   installArguments,
@@ -54,6 +57,33 @@ test("requires confirmed supported daemon version", () => {
   for (const version of [undefined, "0.10.9", "0.11.3", "0.11.4-beta.1"])
     assert.throws(() => assertDaemonVersion(version));
 });
+
+test(
+  "custom Windows shim outside desktop or npm layout fails with guidance",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const { makeAdapter } = await import("../server/core/paseo.mjs");
+    const dir = await mkdtemp(path.join(os.tmpdir(), "paseo-shim-"));
+    try {
+      const shim = path.join(dir, "paseo.cmd");
+      await writeFile(shim, '@echo off\r\nrem custom forwarder, not npm layout\r\n');
+      const resolved = await realpath(shim);
+      await assert.rejects(
+        makeAdapter(path.join(dir, "home"), shim),
+        (error) => {
+          assert.match(error.message, /Unsupported Windows Paseo shim/);
+          assert.ok(
+            error.message.includes(resolved),
+            `message should name the shim, got: ${error.message}`,
+          );
+          return true;
+        },
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 test("updates exact npm and Git revisions without reinstalling configured IDs", async () => {
   const { updateArguments } = await import("../server/core/paseo.mjs");
