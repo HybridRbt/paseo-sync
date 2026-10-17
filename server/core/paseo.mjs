@@ -133,20 +133,28 @@ export async function makeAdapter(home, explicit) {
       launch = desktop;
     else {
       // npm's normal global shim: resolve its package bin without executing cmd.exe.
+      const unsupported = () =>
+        new Error(
+          `Unsupported Windows Paseo shim ${executable}; use the official desktop CLI or npm @getpaseo/cli, or set the plugin CLI path setting.`,
+        );
       const packageRoot = path.join(
         path.dirname(executable),
         "node_modules",
         "@getpaseo",
         "cli",
       );
-      const pkg = JSON.parse(
-        await readFile(path.join(packageRoot, "package.json"), "utf8"),
-      );
+      let pkg;
+      try {
+        pkg = JSON.parse(
+          await readFile(path.join(packageRoot, "package.json"), "utf8"),
+        );
+      } catch (e) {
+        if (e.code === "ENOENT") throw unsupported();
+        throw e;
+      }
       const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.paseo;
       if (!bin || path.isAbsolute(bin) || bin.split(/[\\/]/).includes(".."))
-        throw new Error(
-          "Unsupported Windows Paseo shim; use the official desktop CLI or npm @getpaseo/cli.",
-        );
+        throw unsupported();
       launch = {
         command: process.execPath,
         args: [path.join(packageRoot, bin)],
