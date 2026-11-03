@@ -15,6 +15,16 @@ import { startRpc, jobRpc, unlockRpc, discoverRpc } from "../shared/rpc";
 import type { z } from "zod";
 import { translator, readLanguage, saveLanguage } from "./i18n.mjs";
 import { mergeDiscovery, editCheckout } from "../shared/onboarding.mjs";
+import {
+  actionGate,
+  classifyFailure,
+  progressFromJob,
+  setupSteps,
+  loadProgress,
+  saveProgress,
+  absolutePathLike,
+  EMPTY_PROGRESS,
+} from "../shared/setupFlow.mjs";
 function SyncedSettingsInput({
   initialValue = "",
   ...props
@@ -43,6 +53,50 @@ type Preview = {
   backupId?: string;
   conflicts?: string[];
 };
+// The first-time setup sequence shown at the top of the screen. Labels use the
+// same wording as the matching actions below.
+const SETUP_LABEL: Record<string, string> = {
+  connect: "连接配置仓库并保存设置",
+  prepare: "初始化或拉取仓库",
+  inspect: "检查主机环境",
+  cafe: "预览并确认 Cafe 排除项",
+  apply: "预览并应用同步配置",
+};
+
+// Prerequisite notices and real failures render differently: a missing setup
+// step is guidance, not a malfunction, and must not read as a bug.
+function FailureNotice({
+  message,
+  theme,
+  muted,
+  t,
+}: {
+  message: string;
+  theme: PluginSurfaceProps["theme"];
+  muted: { color: string };
+  t: ReturnType<typeof translator>;
+}) {
+  if (classifyFailure(message) === "precondition")
+    return (
+      <View style={{ gap: 4 }}>
+        <Text style={{ color: theme.colors.statusWarning, fontWeight: "600" }}>
+          {t("需要先完成的前置步骤")}
+        </Text>
+        <Text selectable style={muted}>
+          {message}
+        </Text>
+        <Text style={muted}>
+          {t("这是前置条件提示，不是插件故障；完成对应引导步骤后重试。")}
+        </Text>
+      </View>
+    );
+  return (
+    <Text selectable style={{ color: theme.colors.statusDanger }}>
+      {message}
+    </Text>
+  );
+}
+
 export function SyncScreen({ theme, host }: PluginSurfaceProps) {
   const settings = useSettings(syncSettings),
     discover = useRpc(discoverRpc),
@@ -62,6 +116,8 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
     [searchError, setSearchError] = useState("");
   const [editing, setEditing] = useState(false);
   const searchEpoch = useRef(0);
+  const [progress, setProgress] = useState(() => loadProgress(host.id));
+  const [showSetup, setShowSetup] = useState(false);
   async function findRepositories(requested = draft) {
     const epoch = ++searchEpoch.current;
     setSearching(true);
@@ -78,6 +134,20 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
     }
   }
   const [details, setDetails] = useState(false);
+  // A succeeded job records what the first-time setup has finished on this
+  // host; persisted per client so the checklist does not come back confused.
+  function adoptSucceeded(
+    next: Job | null | undefined,
+    checkout: string,
+  ): Job | null {
+    if (!next || next.status !== "succeeded") return next ?? null;
+    setProgress((current) => {
+      const updated = progressFromJob(current, next.kind, checkout);
+      if (updated !== current) saveProgress(host.id, updated);
+      return updated;
+    });
+    return next;
+  }
   const [job, setJob] = useState<Job | null>(null),
     [pending, setPending] = useState(false),
     [error, setError] = useState(""),
@@ -93,24 +163,27 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
     };
   }, [host.id, settings.status === "ready"]);
   useEffect(() => {
+    if (settings.status !== "ready") return;
     let active = true;
     getJob({})
       .then((v) => {
-        if (active && v) setJob(v as Job);
+        if (active && v)
+          setJob(adoptSucceeded(v as Job, settings.values.checkout));
       })
       .catch(() => {});
     return () => {
       active = false;
     };
-  }, [host.id, getJob]);
+  }, [host.id, getJob, settings.status === "ready"]);
   const running = job?.status === "queued" || job?.status === "running";
   useEffect(() => {
-    if (!running || !job?.id) return;
+    if (!running || !job?.id || settings.status !== "ready") return;
     let active = true;
     const timer = setInterval(() => {
       getJob({ id: job.id })
         .then((v) => {
-          if (active && v) setJob(v as Job);
+          if (active && v)
+            setJob(adoptSucceeded(v as Job, settings.values.checkout));
         })
         .catch((e) => {
           if (active) setError(String(e));
@@ -129,6 +202,49 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
     (c) => c.checkout === draft.checkout,
   );
   const disabled = busy || dirty || settings.status !== "ready";
+  const trackedProgress =
+    settings.status === "ready" && progress.checkout === settings.values.checkout
+      ? progress
+      : EMPTY_PROGRESS;
+  const checkoutSet = absolutePathLike(
+    settings.status === "ready" ? settings.values.checkout : "",
+  );
+  const repoReady =
+    settings.status === "ready" &&
+    checkoutSet &&
+    (trackedProgress.prepared || !!discovery?.selected);
+  const setup = setupSteps({
+    saved: settings.status === "ready",
+    dirty,
+    checkoutSet,
+    repoReady,
+    inspected: trackedProgress.inspected,
+    cafeDone: trackedProgress.cafe,
+    applied: trackedProgress.applied,
+  });
+  const gate = (kind: Request["kind"]) =>
+    actionGate(kind, {
+      saved: settings.status === "ready",
+      dirty,
+      checkoutSet,
+      repoReady,
+      backup: backup.trim().length > 0,
+    });
+  const gateHint: Record<string, string> = {
+    unsaved: t("请先完成第 1 步：保存主机设置。"),
+    dirty: t("请先保存设置，再执行同步操作。"),
+    absolute: t("配置仓库路径需为本机绝对路径。"),
+    repo: t("请先完成第 2 步：初始化或拉取仓库。"),
+    backup: t("请先输入备份 ID。"),
+  };
+  const prepareGate = gate("prepare");
+  const inspectGate = gate("inspect");
+  const cafeGate = gate("cafePlan");
+  const planGate = gate("plan");
+  const publishGate = gate("publishPlan");
+  const verifyGate = gate("verify");
+  const backupsGate = gate("backups");
+  const restoreGate = gate("restorePlan");
   async function run(input: Request) {
     setError("");
     setPending(true);
@@ -156,10 +272,15 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
     ["cliPath", "Paseo CLI 绝对路径（留空自动查找）"],
     ["daemonHome", "Daemon home（留空使用主机默认）"],
   ] as const;
-  const progress = jobProgress(job);
+  const taskProgress = jobProgress(job);
+  const jobPrecondition =
+    job?.status === "failed" &&
+    classifyFailure(job.error ?? "") === "precondition";
   const barColor =
     job?.status === "failed"
-      ? theme.colors.statusDanger
+      ? jobPrecondition
+        ? theme.colors.statusWarning
+        : theme.colors.statusDanger
       : job?.status === "succeeded"
         ? theme.colors.statusSuccess
         : theme.colors.accent;
@@ -168,7 +289,11 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
       {job || error ? (
         <View
           accessibilityRole="progressbar"
-          accessibilityValue={{ min: 0, max: 100, now: Math.round(progress * 100) }}
+          accessibilityValue={{
+            min: 0,
+            max: 100,
+            now: Math.round(taskProgress * 100),
+          }}
           style={{
             gap: 6,
             paddingHorizontal: 20,
@@ -191,7 +316,7 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
                   {t("任务：")}
                   {t(job.kind)} · {t(job.status)} {t(job.phase ?? "")}
                 </Text>
-                <Text style={muted}>{Math.round(progress * 100)}%</Text>
+                <Text style={muted}>{Math.round(taskProgress * 100)}%</Text>
               </View>
               <View
                 style={{
@@ -204,15 +329,18 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
                 <View
                   style={{
                     height: "100%",
-                    width: `${progress * 100}%`,
+                    width: `${taskProgress * 100}%`,
                     backgroundColor: barColor,
                   }}
                 />
               </View>
               {job.error ? (
-                <Text selectable style={{ color: theme.colors.statusDanger }}>
-                  {job.error}
-                </Text>
+                <FailureNotice
+                  message={job.error}
+                  theme={theme}
+                  muted={muted}
+                  t={t}
+                />
               ) : null}
               {job.backupId ? (
                 <Text selectable style={text}>
@@ -223,9 +351,7 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
             </>
           ) : null}
           {error ? (
-            <Text selectable style={{ color: theme.colors.statusDanger }}>
-              {error}
-            </Text>
+            <FailureNotice message={error} theme={theme} muted={muted} t={t} />
           ) : null}
         </View>
       ) : null}
@@ -241,6 +367,68 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
           host: host.label,
         })}
       </Text>
+      <SettingsSection
+        title={t("首次设置")}
+        info={t("首次安装后按从上到下的顺序完成；完成后清单收起为一行。")}
+      >
+        <SettingsCard>
+          {setup.completed ? (
+            <SettingsAction
+              label={t("首次设置已完成")}
+              actionLabel={t(showSetup ? "收起" : "查看")}
+              onPress={() => setShowSetup((v) => !v)}
+            />
+          ) : null}
+          {(!setup.completed || showSetup) ? (
+            <View style={{ gap: 8, padding: 12 }}>
+              {setup.steps.map((step, index) => {
+                const mark =
+                  step.state === "done"
+                    ? "✓"
+                    : step.state === "current"
+                      ? "▶"
+                      : "·";
+                const suffix =
+                  step.state === "current"
+                    ? ` · ${t("当前步骤")}`
+                    : step.state === "waiting"
+                      ? ` · ${t("等待前置")}`
+                      : "";
+                return (
+                  <View
+                    key={step.id}
+                    style={{ flexDirection: "row", gap: 10 }}
+                  >
+                    <Text
+                      style={{
+                        color:
+                          step.state === "done"
+                            ? theme.colors.statusSuccess
+                            : step.state === "current"
+                              ? theme.colors.accent
+                              : theme.colors.foregroundMuted,
+                        width: 16,
+                      }}
+                    >
+                      {mark}
+                    </Text>
+                    <Text
+                      style={
+                        step.state === "waiting" || step.state === "done"
+                          ? muted
+                          : text
+                      }
+                    >
+                      {`${index + 1}. ${t(SETUP_LABEL[step.id])}`}
+                      {suffix}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          ) : null}
+        </SettingsCard>
+      </SettingsSection>
       <SettingsSection title={t("界面语言")}>
         <Text style={muted}>
           {t("当前 Paseo 未提供语言接口，请在此选择；此选择仅用于当前客户端。")}
@@ -413,67 +601,94 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
         <SettingsCard>
           <SettingsAction
             label={t("初始化或拉取仓库")}
-            hint={t("仅允许快进；工作区有修改或历史分叉时停止。")}
+            hint={
+              prepareGate.reason
+                ? gateHint[prepareGate.reason]
+                : t("仅允许快进；工作区有修改或历史分叉时停止。")
+            }
             actionLabel={t("拉取")}
-            disabled={disabled}
+            disabled={busy || prepareGate.disabled}
             onPress={() => void run({ kind: "prepare" })}
           />
           <SettingsAction
             label={t("检查主机环境")}
+            hint={inspectGate.reason ? gateHint[inspectGate.reason] : undefined}
             actionLabel={t("检查")}
-            disabled={disabled}
+            disabled={busy || inspectGate.disabled}
             onPress={() => void run({ kind: "inspect" })}
           />
           <SettingsAction
             label={t("检查 Cafe 自动更新冲突")}
-            hint={t("预览后确认，将受管插件加入更新排除列表。")}
+            hint={
+              cafeGate.reason
+                ? gateHint[cafeGate.reason]
+                : t("预览后确认，将受管插件加入更新排除列表。")
+            }
             actionLabel={t("预览")}
-            disabled={disabled}
+            disabled={busy || cafeGate.disabled}
             onPress={() => void run({ kind: "cafePlan" })}
           />
           <SettingsAction
             label={t("同步仓库配置到本机")}
+            hint={planGate.reason ? gateHint[planGate.reason] : undefined}
             actionLabel={t("预览差异")}
-            disabled={disabled}
+            disabled={busy || planGate.disabled}
             onPress={() => void run({ kind: "plan" })}
           />
           <SettingsAction
             label={t("发布本机配置")}
-            hint={t("预览导出内容，确认后提交并推送到配置仓库。")}
+            hint={
+              publishGate.reason
+                ? gateHint[publishGate.reason]
+                : t("预览导出内容，确认后提交并推送到配置仓库。")
+            }
             actionLabel={t("预览发布")}
-            disabled={disabled}
+            disabled={busy || publishGate.disabled}
             onPress={() => void run({ kind: "publishPlan" })}
           />
           <SettingsAction
             label={t("验证同步结果")}
+            hint={verifyGate.reason ? gateHint[verifyGate.reason] : undefined}
             actionLabel={t("验证")}
-            disabled={disabled}
+            disabled={busy || verifyGate.disabled}
             onPress={() => void run({ kind: "verify" })}
           />
         </SettingsCard>
       </SettingsSection>
       <SettingsSection title={t("恢复")}>
         <SettingsCard>
-          <SettingsAction
-            label={t("列出当前配置仓库的备份")}
-            actionLabel={t("查看")}
-            disabled={disabled}
-            onPress={() => void run({ kind: "backups" })}
-          />
+          {(() => {
+            const g = gate("backups");
+            return (
+              <SettingsAction
+                label={t("列出当前配置仓库的备份")}
+                hint={g.reason ? gateHint[g.reason] : undefined}
+                actionLabel={t("查看")}
+                disabled={busy || g.disabled}
+                onPress={() => void run({ kind: "backups" })}
+              />
+            );
+          })()}
           <SettingsInput
             label={t("备份 ID（Cafe 使用 cafe: 前缀）")}
             initialValue={backup}
             disabled={busy}
             onChangeText={setBackup}
           />
-          <SettingsAction
-            label={t("恢复备份")}
-            actionLabel={t("预览恢复")}
-            disabled={disabled || !backup}
-            onPress={() =>
-              void run({ kind: "restorePlan", backupId: backup.trim() })
-            }
-          />
+          {(() => {
+            const g = gate("restorePlan");
+            return (
+              <SettingsAction
+                label={t("恢复备份")}
+                hint={g.reason ? gateHint[g.reason] : undefined}
+                actionLabel={t("预览恢复")}
+                disabled={busy || g.disabled}
+                onPress={() =>
+                  void run({ kind: "restorePlan", backupId: backup.trim() })
+                }
+              />
+            );
+          })()}
           <SettingsAction
             label={t("中断后解除任务锁")}
             hint={t(

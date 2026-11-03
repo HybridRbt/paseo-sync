@@ -109,6 +109,27 @@ const english = {
   使用此仓库: "Use this repository",
   "搜索失败，可手动填写。":
     "Search failed. You can enter the details manually.",
+  首次设置: "First-time setup",
+  "首次安装后按从上到下的顺序完成；完成后清单收起为一行。":
+    "Complete these in order after installing; the list collapses to one line when finished.",
+  "连接配置仓库并保存设置":
+    "Connect the configuration repository and save settings",
+  "预览并确认 Cafe 排除项": "Preview and confirm Cafe exclusions",
+  "预览并应用同步配置": "Preview and apply the repository configuration",
+  当前步骤: "Current step",
+  等待前置: "Waiting for earlier steps",
+  "首次设置已完成": "First-time setup complete",
+  收起: "Collapse",
+  "需要先完成的前置步骤": "A prerequisite step is missing",
+  "这是前置条件提示，不是插件故障；完成对应引导步骤后重试。":
+    "This is a prerequisite notice, not a malfunction. Complete the corresponding guided step and retry.",
+  "请先完成第 1 步：保存主机设置。":
+    "Complete step 1 first: save the host settings.",
+  "请先完成第 2 步：初始化或拉取仓库。":
+    "Complete step 2 first: initialize or pull the repository.",
+  "配置仓库路径需为本机绝对路径。":
+    "The repository path must be an absolute path on this host.",
+  "请先输入备份 ID。": "Enter a backup ID first.",
   queued: "Queued",
   running: "Running",
   succeeded: "Succeeded",
