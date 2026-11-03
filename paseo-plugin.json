@@ -3,6 +3,6 @@
   "name": "Paseo Sync",
   "description": "Sync plugins and allowlisted settings through your own Git repository",
   "requirements": {
-    "paseo": ">=0.11.4 <0.12.0"
+    "paseo": ">=0.11.4 <0.16.0"
   }
 }
