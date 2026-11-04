@@ -800,6 +800,8 @@ function ResultSummary({
       head?: string;
       revision?: string;
       published?: boolean;
+      // Present only on apply-side skips: the local checkout left untouched.
+      checkout?: string;
     }[];
     changes?: {
       plugin: string;
@@ -841,29 +843,57 @@ function ResultSummary({
       ))}
       {r.skipped?.map((s) =>
         s.reason === "local-source-changes" || s.reason === "head-differs" ? (
-          <View key={s.plugin} style={{ gap: 4 }}>
-            <Text selectable style={text}>
-              {t(
-                s.reason === "head-differs"
-                  ? "跳过 {plugin}：本机源码与安装版本不一致，本次不发布它的变更。"
-                  : "跳过 {plugin}：本地源码有未提交改动，本次不发布它的变更。",
-                { plugin: s.plugin },
-              )}
-              {s.files?.length
-                ? " " +
-                  t("改动文件：{files}", { files: s.files.join(", ") })
-                : ""}
-            </Text>
-            <Text selectable style={text}>
-              {s.published
-                ? t("配置仓库沿用该插件已发布的版本。")
-                : t("该插件尚未发布过，本次不出现在配置中。")}{" "}
-              {t(
-                "在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览发布即可带上新版本。",
-                { plugin: s.plugin },
-              )}
-            </Text>
-          </View>
+          s.checkout !== undefined ? (
+            // Apply side: the dirty local source keeps its local state; the
+            // checkout path and repair steps tell the user how to converge.
+            <View key={s.plugin} style={{ gap: 4 }}>
+              <Text selectable style={text}>
+                {t(
+                  s.reason === "head-differs"
+                    ? "跳过 {plugin}：本机源码与安装版本不一致，本次不应用到本机。"
+                    : "跳过 {plugin}：本地源码有未提交改动，本次不应用到本机。",
+                  { plugin: s.plugin },
+                )}
+                {s.files?.length
+                  ? " " +
+                    t("改动文件：{files}", { files: s.files.join(", ") })
+                  : ""}
+              </Text>
+              <Text selectable style={text}>
+                {t("本机源码目录：{checkout}", { checkout: s.checkout })}
+              </Text>
+              <Text selectable style={text}>
+                {t(
+                  "该插件本次保持本机现状，未被同步修改。在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览差异即可同步新版本。",
+                  { plugin: s.plugin },
+                )}
+              </Text>
+            </View>
+          ) : (
+            <View key={s.plugin} style={{ gap: 4 }}>
+              <Text selectable style={text}>
+                {t(
+                  s.reason === "head-differs"
+                    ? "跳过 {plugin}：本机源码与安装版本不一致，本次不发布它的变更。"
+                    : "跳过 {plugin}：本地源码有未提交改动，本次不发布它的变更。",
+                  { plugin: s.plugin },
+                )}
+                {s.files?.length
+                  ? " " +
+                    t("改动文件：{files}", { files: s.files.join(", ") })
+                  : ""}
+              </Text>
+              <Text selectable style={text}>
+                {s.published
+                  ? t("配置仓库沿用该插件已发布的版本。")
+                  : t("该插件尚未发布过，本次不出现在配置中。")}{" "}
+                {t(
+                  "在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览发布即可带上新版本。",
+                  { plugin: s.plugin },
+                )}
+              </Text>
+            </View>
+          )
         ) : (
           <Text key={s.plugin} style={text}>
             {t("跳过 {plugin}：本机未安装，配置要求保持禁用。", {
