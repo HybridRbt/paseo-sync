@@ -1,6 +1,17 @@
 const english = {
   "跳过 {plugin}：本机未安装，配置要求保持禁用。":
     "Skip {plugin}: not installed on this host and disabled in the profile.",
+  "跳过 {plugin}：本地源码有未提交改动，本次不发布它的变更。":
+    "Skipped {plugin}: local source has uncommitted changes; its changes are not published this time.",
+  "跳过 {plugin}：本机源码与安装版本不一致，本次不发布它的变更。":
+    "Skipped {plugin}: local source HEAD differs from the installed revision; its changes are not published this time.",
+  "改动文件：{files}": "Changed files: {files}",
+  "配置仓库沿用该插件已发布的版本。":
+    "The configuration repository keeps this plugin's previously published version.",
+  "该插件尚未发布过，本次不出现在配置中。":
+    "This plugin has never been published; it stays out of the profile this time.",
+  "在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览发布即可带上新版本。":
+    "Commit and push in the plugin's source repository, run paseo plugin update {plugin}, then preview and publish again to include the new revision.",
   "操作主机：{host}。任务在此主机执行；每台 daemon 分别同步。":
     "Host: {host}. Tasks run here; sync each daemon separately.",
   配置仓库本机绝对路径: "Configuration repository absolute path",
