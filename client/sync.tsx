@@ -793,7 +793,14 @@ function ResultSummary({
 }) {
   const r = (value ?? {}) as {
     conflicts?: string[];
-    skipped?: { plugin: string; reason: string }[];
+    skipped?: {
+      plugin: string;
+      reason: string;
+      files?: string[];
+      head?: string;
+      revision?: string;
+      published?: boolean;
+    }[];
     changes?: {
       plugin: string;
       actions: string[];
@@ -832,13 +839,39 @@ function ResultSummary({
           {c}
         </Text>
       ))}
-      {r.skipped?.map((s) => (
-        <Text key={s.plugin} style={text}>
-          {t("跳过 {plugin}：本机未安装，配置要求保持禁用。", {
-            plugin: s.plugin,
-          })}
-        </Text>
-      ))}
+      {r.skipped?.map((s) =>
+        s.reason === "local-source-changes" || s.reason === "head-differs" ? (
+          <View key={s.plugin} style={{ gap: 4 }}>
+            <Text selectable style={text}>
+              {t(
+                s.reason === "head-differs"
+                  ? "跳过 {plugin}：本机源码与安装版本不一致，本次不发布它的变更。"
+                  : "跳过 {plugin}：本地源码有未提交改动，本次不发布它的变更。",
+                { plugin: s.plugin },
+              )}
+              {s.files?.length
+                ? " " +
+                  t("改动文件：{files}", { files: s.files.join(", ") })
+                : ""}
+            </Text>
+            <Text selectable style={text}>
+              {s.published
+                ? t("配置仓库沿用该插件已发布的版本。")
+                : t("该插件尚未发布过，本次不出现在配置中。")}{" "}
+              {t(
+                "在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览发布即可带上新版本。",
+                { plugin: s.plugin },
+              )}
+            </Text>
+          </View>
+        ) : (
+          <Text key={s.plugin} style={text}>
+            {t("跳过 {plugin}：本机未安装，配置要求保持禁用。", {
+              plugin: s.plugin,
+            })}
+          </Text>
+        ),
+      )}
       {r.changes?.length === 0 ? (
         <Text style={text}>{t("配置一致，无需修改。")}</Text>
       ) : null}

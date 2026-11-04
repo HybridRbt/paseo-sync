@@ -156,3 +156,97 @@ test("changing only pushurl invalidates an existing publish approval", async () 
   f.git("remote", "set-url", "--push", "origin", b);
   await assert.rejects(repository.publish(f, p.approval), /stale/i);
 });
+
+test("publish preview discloses skipped dirty Git plugins instead of failing", async () => {
+  const f = await fixture(),
+    dir = path.join(f.home, "hot");
+  await mkdir(dir);
+  const hot = (...a) =>
+    execFileSync("git", ["-c", "core.fsmonitor=false", "-C", dir, ...a], {
+      encoding: "utf8",
+    }).trim();
+  hot("init", "-q");
+  hot("config", "user.name", "Test");
+  hot("config", "user.email", "test@example.invalid");
+  await writeFile(path.join(dir, "code.ts"), "one");
+  hot("add", ".");
+  hot("commit", "-qm", "one");
+  f.rows.push({
+    id: "hot",
+    enabled: true,
+    status: "running",
+    path: dir,
+    installation: {
+      identity: {
+        kind: "git",
+        remote: "https://example.invalid/hot.git",
+        pluginPath: ".",
+      },
+      currentRevision: hot("rev-parse", "HEAD"),
+    },
+  });
+  await writeFile(path.join(dir, "code.ts"), "hotfix");
+  const p = await repository.publishPlan(f);
+  assert.deepEqual(p.skipped, [
+    { plugin: "hot", reason: "local-source-changes", files: ["code.ts"] },
+  ]);
+  await repository.publish(f, p.approval, { push: false });
+  const manifest = JSON.parse(
+    await readFile(path.join(f.root, "profile.json"), "utf8"),
+  );
+  assert.ok(!manifest.plugins.some((x) => x.id === "hot"));
+  assert.ok(manifest.plugins.some((x) => x.id === "demo"));
+});
+test("a publish approval becomes stale when a skipped plugin recovers, even if files match", async () => {
+  const f = await fixture(),
+    dir = path.join(f.home, "hot");
+  await mkdir(dir);
+  const hot = (...a) =>
+    execFileSync("git", ["-c", "core.fsmonitor=false", "-C", dir, ...a], {
+      encoding: "utf8",
+    }).trim();
+  hot("init", "-q");
+  hot("config", "user.name", "Test");
+  hot("config", "user.email", "test@example.invalid");
+  await writeFile(path.join(dir, "code.ts"), "one");
+  hot("add", ".");
+  hot("commit", "-qm", "one");
+  f.rows.push({
+    id: "hot",
+    enabled: true,
+    status: "running",
+    path: dir,
+    installation: {
+      identity: {
+        kind: "git",
+        remote: "https://example.invalid/hot.git",
+        pluginPath: ".",
+      },
+      currentRevision: hot("rev-parse", "HEAD"),
+    },
+  });
+  // First publish while the plugin is clean so the repository has its entry.
+  let p = await repository.publishPlan(f);
+  await repository.publish(f, p.approval, { push: false });
+  await writeFile(path.join(dir, "code.ts"), "hotfix");
+  p = await repository.publishPlan(f);
+  assert.deepEqual(p.skipped, [
+    {
+      plugin: "hot",
+      reason: "local-source-changes",
+      files: ["code.ts"],
+      published: true,
+    },
+  ]);
+  assert.equal(p.files.length, 0);
+  // The host reverts its local edit: file contents stay identical, but the
+  // skip set changed, so the approval previewed with the skip is stale.
+  hot("checkout", "--", "code.ts");
+  const clean = await repository.publishPlan(f);
+  assert.deepEqual(clean.skipped, []);
+  assert.equal(clean.files.length, 0);
+  await assert.rejects(
+    repository.publish(f, p.approval, { push: false }),
+    /stale/i,
+  );
+});

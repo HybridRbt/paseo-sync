@@ -144,6 +144,8 @@ const flags = [
   "assistantMarkdown",
   "compactRowSpacing",
   "compactReplySpacing",
+  "autoUpdateCheck",
+  "blockDetails",
 ];
 export function validateSettings(plugin, document, d) {
   check(
@@ -161,6 +163,7 @@ export function validateSettings(plugin, document, d) {
     "customMonoFont",
     "codeFontSize",
     "blockFontSize",
+    "detailsFontSize",
     "hoverDelaySeconds",
   ];
   keys(d.values, allowed, []);
@@ -186,6 +189,11 @@ export function validateSettings(plugin, document, d) {
       check(
         Number.isInteger(value) && value >= 9 && value <= 20,
         "Invalid block font size",
+      );
+    else if (key === "detailsFontSize")
+      check(
+        Number.isInteger(value) && value >= 12 && value <= 26,
+        "Invalid details font size",
       );
     else if (key === "hoverDelaySeconds")
       check(

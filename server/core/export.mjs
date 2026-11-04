@@ -20,6 +20,7 @@ import {
 } from "./profile.mjs";
 
 import { git } from "./git.mjs";
+import { sourceState } from "./source-state.mjs";
 export async function assertRepositoryReady(root) {
   await git(root, "rev-parse", "--show-toplevel");
   if (await git(root, "status", "--porcelain", "--untracked-files=no"))
@@ -77,28 +78,48 @@ export async function exportProfile(ctx) {
         !ctx.selfIds?.includes(p.id),
     ) ?? [];
   const retainedIds = new Set(retained.map((p) => p.id));
-  const plugins = [...rows.map(snapshotPlugin), ...retained].sort((a, b) =>
-    a.id.localeCompare(b.id),
-  );
+  // A Git plugin whose local source is not a clean, provenance-matching
+  // revision cannot be exported portably. Instead of blocking the whole
+  // profile, the plugin is skipped: a previously published entry stays as the
+  // repository has it, and an unpublished one is left out of this export.
+  const skipped = [];
   for (const row of rows) {
-    if (
-      row.installation?.identity.kind === "git" &&
-      row.path &&
-      (await git(row.path, "rev-parse", "HEAD")) !==
-        row.installation.currentRevision
-    )
-      throw new Error(
-        `Git plugin HEAD differs from installation revision: ${row.id}. Update provenance before exporting.`,
-      );
-    if (
-      row.installation?.identity.kind === "git" &&
-      row.path &&
-      (await git(row.path, "status", "--porcelain", "--untracked-files=all"))
-    )
-      throw new Error(
-        `Git plugin has local source changes: ${row.id}. Commit a portable source revision first.`,
-      );
+    if (row.installation?.identity.kind !== "git" || !row.path) continue;
+    // sourceState shares the cleanliness notion of apply and baseline capture:
+    // recorded patch applications stay clean, any other working-tree change or
+    // a HEAD drift from provenance does not.
+    const state = await sourceState(row, loaded ?? { patches: [] });
+    if (state.clean) continue;
+    skipped.push(
+      state.head === row.installation.currentRevision
+        ? {
+            plugin: row.id,
+            reason: "local-source-changes",
+            files: state.changed,
+          }
+        : {
+            plugin: row.id,
+            reason: "head-differs",
+            head: state.head,
+            revision: row.installation.currentRevision,
+          },
+    );
   }
+  const skippedIds = new Set(skipped.map((s) => s.plugin));
+  const carried = [];
+  for (const s of skipped) {
+    const remote = loaded?.manifest.plugins.find((p) => p.id === s.plugin);
+    if (remote) {
+      s.published = true;
+      carried.push(remote);
+    }
+  }
+  const carriedIds = new Set(carried.map((p) => p.id));
+  const plugins = [
+    ...rows.filter((r) => !skippedIds.has(r.id)).map(snapshotPlugin),
+    ...carried,
+    ...retained,
+  ].sort((a, b) => a.id.localeCompare(b.id));
   const previous = await jsonOrNull(await safeFile(ctx.state, "baseline.json"));
   if (loaded && previous) {
     const ids = new Set([
@@ -120,7 +141,10 @@ export async function exportProfile(ctx) {
     }
   }
   const settings = [];
-  if (rows.some((p) => p.id === "better-paseo")) {
+  if (
+    rows.some((p) => p.id === "better-paseo") &&
+    !skippedIds.has("better-paseo")
+  ) {
     const file = "settings/better-paseo/presentation.json";
     const data = await jsonOrNull(await safeFile(ctx.home, "plugin-" + file));
     if (data !== null) {
@@ -134,7 +158,9 @@ export async function exportProfile(ctx) {
     }
   }
   settings.push(
-    ...(loaded?.settings.filter((s) => retainedIds.has(s.plugin)) ?? []),
+    ...(loaded?.settings.filter(
+      (s) => retainedIds.has(s.plugin) || carriedIds.has(s.plugin),
+    ) ?? []),
   );
   if (loaded && previous) {
     const names = new Set([
@@ -168,7 +194,7 @@ export async function exportProfile(ctx) {
       file: "patches/github-board-0.10.2-icons.json",
     });
   for (const entry of candidates) {
-    if (retainedIds.has(entry.plugin)) {
+    if (retainedIds.has(entry.plugin) || carriedIds.has(entry.plugin)) {
       patches.push(entry);
       continue;
     }
@@ -205,6 +231,7 @@ export async function exportProfile(ctx) {
     settings: settings.length,
     patches: patches.length,
     profileHash: (await loadProfile(ctx.root)).hash,
+    skipped,
     warnings: [
       "Only allowlisted settings and explicitly recorded source patches are exported. Credentials, native client preferences and additional plugin data remain local.",
     ],
