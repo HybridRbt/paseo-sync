@@ -332,14 +332,17 @@ async function saveBaseline(ctx, current, profile) {
     ...baseState(current),
   });
 }
-export async function captureBaseline(ctx, profile) {
+export async function captureBaseline(ctx, profile, skipIds = new Set()) {
   const current = await capture(ctx, profile);
   if (
-    Object.values(current.plugins).some((p) => p?.sourceState?.clean === false)
+    Object.entries(current.plugins).some(
+      ([id, p]) => !skipIds.has(id) && p?.sourceState?.clean === false,
+    )
   )
     throw new Error("Local source changed while preparing publish");
   for (const p of profile.manifest.plugins)
     if (
+      !skipIds.has(p.id) &&
       !skipMissingDisabled(ctx, current, p) &&
       !same(
         pluginIdentity(current.plugins[p.id]?.descriptor),
@@ -349,6 +352,7 @@ export async function captureBaseline(ctx, profile) {
       throw new Error("Local plugin state changed while preparing publish");
   for (const setting of profile.settings)
     if (
+      !skipIds.has(setting.plugin) &&
       !skipMissingDisabled(
         ctx,
         current,
@@ -358,13 +362,15 @@ export async function captureBaseline(ctx, profile) {
     )
       throw new Error("Local settings changed while preparing publish");
   for (const bundle of profile.patches)
-    for (const f of skipMissingDisabled(
-      ctx,
-      current,
-      profile.manifest.plugins.find((p) => p.id === bundle.plugin),
-    )
-      ? []
-      : bundle.data.files) {
+    if (skipIds.has(bundle.plugin)) continue;
+    else
+      for (const f of skipMissingDisabled(
+        ctx,
+        current,
+        profile.manifest.plugins.find((p) => p.id === bundle.plugin),
+      )
+        ? []
+        : bundle.data.files) {
       const raw = current.patches[`${bundle.plugin}/${f.path}`];
       if (raw === null || digest(Buffer.from(raw, "base64")) !== f.afterSha256)
         throw new Error("Local source patch changed while preparing publish");

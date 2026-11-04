@@ -134,7 +134,7 @@ async function exportSnapshot(ctx) {
           await bytesOrNull(await safeFile(ctx.root, file)),
         );
     }
-    await exportProfile({ ...ctx, root: temp });
+    const exported = await exportProfile({ ...ctx, root: temp });
     const loaded = await loadProfile(temp);
     const files = [];
     for (const file of [
@@ -158,8 +158,23 @@ async function exportSnapshot(ctx) {
       upstream,
       pushUrl,
       files,
-      _baseline: await captureBaseline(ctx, loaded),
-      approval: objectHash({ head, origin, pushUrl, upstream, files }),
+      // Disclosed in the preview and bound into the approval hash: if a skipped
+      // plugin recovers (or another one becomes dirty) between preview and
+      // confirm, the reviewed approval is stale even when file bytes match.
+      skipped: exported.skipped,
+      _baseline: await captureBaseline(
+        ctx,
+        loaded,
+        new Set(exported.skipped.map((s) => s.plugin)),
+      ),
+      approval: objectHash({
+        head,
+        origin,
+        pushUrl,
+        upstream,
+        files,
+        skipped: exported.skipped,
+      }),
     };
   } finally {
     await rm(temp, { recursive: true, force: true });

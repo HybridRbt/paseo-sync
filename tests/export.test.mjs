@@ -184,7 +184,27 @@ test("export refuses unapplied additions, deletions and missing settings against
     );
   }
 });
-test("export refuses a committed Git HEAD that differs from installation provenance", async () => {
+test("settings allowlist tracks newer better-paseo presentation options", async () => {
+  const { validateSettings } = await import("../server/core/profile.mjs");
+  // Shape observed on a real host running a newer better-paseo.
+  validateSettings("better-paseo", "presentation", {
+    version: 1,
+    values: {
+      autoUpdateCheck: true,
+      blockDetails: false,
+      detailsFontSize: 14,
+    },
+  });
+  assert.throws(
+    () =>
+      validateSettings("better-paseo", "presentation", {
+        version: 1,
+        values: { detailsFontSize: 30 },
+      }),
+    /details font size/i,
+  );
+});
+test("export skips a Git plugin whose HEAD differs from provenance instead of blocking the profile", async () => {
   const ctx = await fixture(),
     dir = path.join(ctx.home, "source");
   await mkdir(dir);
@@ -202,10 +222,23 @@ test("export refuses a committed Git HEAD that differs from installation provena
   ctx.rows[0].installation.currentRevision = git("rev-parse", "HEAD");
   await writeFile(path.join(dir, "code.ts"), "two");
   git("commit", "-qam", "two");
-  await assert.rejects(exportProfile(ctx), /HEAD|revision|provenance/i);
-  await assert.rejects(readFile(path.join(ctx.root, "profile.json")));
+  const result = await exportProfile(ctx);
+  assert.deepEqual(result.skipped, [
+    {
+      plugin: "better-paseo",
+      reason: "head-differs",
+      head: git("rev-parse", "HEAD"),
+      revision: ctx.rows[0].installation.currentRevision,
+    },
+  ]);
+  // Never published locally: the plugin and its settings stay out entirely.
+  const manifest = JSON.parse(
+    await readFile(path.join(ctx.root, "profile.json"), "utf8"),
+  );
+  assert.deepEqual(manifest.plugins, []);
+  assert.deepEqual(manifest.settings, []);
 });
-test("export refuses untracked Git runtime files as unrecorded local source", async () => {
+test("export skips a Git plugin with untracked local files and discloses them", async () => {
   const ctx = await fixture(),
     dir = path.join(ctx.home, "source");
   await mkdir(dir);
@@ -222,7 +255,83 @@ test("export refuses untracked Git runtime files as unrecorded local source", as
   ctx.rows[0].path = dir;
   ctx.rows[0].installation.currentRevision = git("rev-parse", "HEAD");
   await writeFile(path.join(dir, "extra.ts"), "local");
-  await assert.rejects(exportProfile(ctx), /local source|untracked|changes/i);
+  const result = await exportProfile(ctx);
+  assert.deepEqual(result.skipped, [
+    {
+      plugin: "better-paseo",
+      reason: "local-source-changes",
+      files: ["extra.ts"],
+    },
+  ]);
+  const manifest = JSON.parse(
+    await readFile(path.join(ctx.root, "profile.json"), "utf8"),
+  );
+  assert.deepEqual(manifest.plugins, []);
+  assert.deepEqual(manifest.settings, []);
+});
+test("export keeps the previously published entry verbatim for a dirty Git plugin", async () => {
+  const ctx = await fixture(),
+    dir = path.join(ctx.home, "source");
+  await mkdir(dir);
+  const git = (...a) =>
+    execFileSync("git", ["-c", "core.fsmonitor=false", "-C", dir, ...a], {
+      encoding: "utf8",
+    }).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  await writeFile(path.join(dir, "code.ts"), "one");
+  git("add", ".");
+  git("commit", "-qm", "one");
+  ctx.rows[0].path = dir;
+  ctx.rows[0].installation.currentRevision = git("rev-parse", "HEAD");
+  await writeFile(path.join(dir, "code.ts"), "hotfix");
+  const file = "settings/better-paseo/presentation.json";
+  const manifest = {
+    schemaVersion: 1,
+    plugins: [
+      {
+        id: "better-paseo",
+        source: "git:https://github.com/RoundRedDot/better-paseo",
+        revision: ctx.rows[0].installation.currentRevision,
+        enabled: true,
+      },
+    ],
+    settings: [{ plugin: "better-paseo", document: "presentation", file }],
+    patches: [],
+  };
+  await writeJson(path.join(ctx.root, file), {
+    version: 1,
+    values: { previewWrap: false },
+  });
+  await writeJson(path.join(ctx.root, "profile.json"), manifest);
+  for (const args of [
+    ["config", "user.name", "Test"],
+    ["config", "user.email", "test@example.invalid"],
+    ["add", "."],
+    ["commit", "-qm", "profile"],
+  ])
+    execFileSync("git", ["-C", ctx.root, ...args], { stdio: "pipe" });
+  const result = await exportProfile(ctx);
+  assert.deepEqual(result.skipped, [
+    {
+      plugin: "better-paseo",
+      reason: "local-source-changes",
+      files: ["code.ts"],
+      published: true,
+    },
+  ]);
+  assert.equal(result.plugins, 1);
+  // The published entry, its settings document and their contents are carried
+  // over from the repository, not from this host's dirty working tree.
+  assert.deepEqual(
+    JSON.parse(await readFile(path.join(ctx.root, "profile.json"), "utf8")),
+    manifest,
+  );
+  assert.deepEqual(
+    JSON.parse(await readFile(path.join(ctx.root, file), "utf8")),
+    { version: 1, values: { previewWrap: false } },
+  );
 });
 
 test("after syncing an absent disabled plugin export preserves its intent, settings and patch without reading orphan data", async () => {
