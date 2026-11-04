@@ -219,10 +219,29 @@ async function planData(ctx) {
       skipped.push({ plugin: target.id, reason: "missing-disabled" });
       continue;
     }
-    if (currentPlugin?.sourceState?.clean === false)
-      conflicts.push(
-        `Local source edits or dirty Git HEAD prevent synchronization: ${target.id}`,
+    // Reconciling a dirty local Git source with the profile would destroy the
+    // local edits (update replaces the whole checkout), so the plugin is
+    // skipped with its dirtiness disclosed, exactly like publish, and
+    // everything else synchronizes.
+    if (currentPlugin?.sourceState?.clean === false) {
+      skipped.push(
+        currentPlugin.sourceState.head === now?.revision
+          ? {
+              plugin: target.id,
+              reason: "local-source-changes",
+              files: currentPlugin.sourceState.changed,
+              checkout: currentPlugin.path,
+            }
+          : {
+              plugin: target.id,
+              reason: "head-differs",
+              head: currentPlugin.sourceState.head,
+              revision: now?.revision,
+              checkout: currentPlugin.path,
+            },
       );
+      continue;
+    }
     const sameVersion =
       now &&
       same(
@@ -377,14 +396,17 @@ export async function captureBaseline(ctx, profile, skipIds = new Set()) {
     }
   return { schemaVersion: 1, profileHash: profile.hash, ...baseState(current) };
 }
-export async function verify(ctx) {
+// A plugin skipped by an operation (dirty source, missing-disabled) is outside
+// that operation's verified scope: its acknowledged divergence must not fail
+// the verification of everything that was applied.
+export async function verify(ctx, skip = new Set()) {
   const profile = await loadProfile(ctx.root),
     current = await capture(ctx, profile);
   const differences = [],
     runtime = [];
   for (const p of profile.manifest.plugins) {
     const c = current.plugins[p.id];
-    if (skipMissingDisabled(ctx, current, p)) continue;
+    if (skipMissingDisabled(ctx, current, p) || skip.has(p.id)) continue;
     if (!same(pluginIdentity(c?.descriptor), pluginIdentity(p)))
       differences.push(`plugin:${p.id}`);
     if (c?.sourceState?.clean === false) differences.push(`source:${p.id}`);
@@ -398,21 +420,22 @@ export async function verify(ctx) {
         current,
         profile.manifest.plugins.find((p) => p.id === s.plugin),
       ) &&
+      !skip.has(s.plugin) &&
       !same(parsed(current.settings[s.file]), s.data)
     )
       differences.push(s.file);
-  for (const b of profile.patches)
-    for (const f of skipMissingDisabled(
-      ctx,
-      current,
-      profile.manifest.plugins.find((p) => p.id === b.plugin),
-    )
-      ? []
-      : b.data.files) {
+  for (const b of profile.patches) {
+    const owner = profile.manifest.plugins.find((p) => p.id === b.plugin);
+    const files =
+      skipMissingDisabled(ctx, current, owner) || skip.has(b.plugin)
+        ? []
+        : b.data.files;
+    for (const f of files) {
       const raw = current.patches[`${b.plugin}/${f.path}`];
       if (raw === null || digest(Buffer.from(raw, "base64")) !== f.afterSha256)
         differences.push(`patch:${b.plugin}/${f.path}`);
     }
+  }
   if (!current.pluginsEnabled)
     runtime.push({ plugin: "*", status: "pluginsEnabled=false" });
   return {
@@ -441,12 +464,13 @@ export async function applyPlan(ctx, approval) {
         "Plan is stale. Run plan again and review its differences.",
       );
     if (plan.conflicts.length) throw new Error(plan.conflicts.join("\n"));
+    const skippedIds = new Set(plan.skipped.map((s) => s.plugin));
     if (plan.changes.length === 0) {
       await saveBaseline(ctx, current, profile);
       return {
         changed: false,
         backupId: null,
-        verification: await verify(ctx),
+        verification: await verify(ctx, skippedIds),
       };
     }
     const id = randomUUID();
@@ -533,7 +557,7 @@ export async function applyPlan(ctx, approval) {
       }
       if (target.enabled) await ctx.adapter.act("enable", id);
     }
-    const verification = await verify(ctx);
+    const verification = await verify(ctx, skippedIds);
     backup.after = await capture(ctx, backup.profile);
     if (!verification.configurationMatches || !verification.runtimeHealthy)
       throw new Error(`Verification failed: ${JSON.stringify(verification)}`);

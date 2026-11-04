@@ -472,7 +472,7 @@ test("restore failures persist final observed state and backup ID, permitting a 
   assert.equal((await f.adapter.list())[0].enabled, true);
 });
 
-test("unrecorded Git source edits block update and fail configuration verification", async (t) => {
+test("unrecorded Git source edits skip the plugin with disclosed files instead of blocking", async (t) => {
   const f = await fixture(t, { installed: true }),
     { execFileSync } = await import("node:child_process");
   const row = (await f.adapter.list())[0];
@@ -502,14 +502,145 @@ test("unrecorded Git source edits block update and fail configuration verificati
   };
   await writeJson(f.setting, f.target);
   await writeFile(path.join(row.path, "index.client.tsx"), "local work");
+  // Standalone verification keeps reporting the drift honestly.
   assert.equal((await verify(f.ctx)).configurationMatches, false);
-  f.manifest.plugins[0].revision = "a".repeat(40);
-  await writeJson(path.join(f.root, "profile.json"), f.manifest);
   const p = await buildPlan(f.ctx);
-  assert.ok(
-    p.conflicts.some((x) => /source.*(edit|dirty)|local.*source/i.test(x)),
+  assert.deepEqual(p.conflicts, []);
+  assert.deepEqual(p.skipped, [
+    {
+      plugin: "better-paseo",
+      reason: "local-source-changes",
+      files: ["index.client.tsx"],
+      checkout: row.path,
+    },
+  ]);
+  const result = await applyPlan(f.ctx, p.approval);
+  assert.equal(result.changed, false);
+  assert.equal(result.verification.configurationMatches, true);
+  assert.equal(
+    await readFile(path.join(row.path, "index.client.tsx"), "utf8"),
+    "local work",
   );
-  await assert.rejects(applyPlan(f.ctx, p.approval), /source/i);
+  assert.deepEqual(f.calls, []);
+  // Converging back to a clean source invalidates the dirty preview.
+  await writeFile(path.join(row.path, "index.client.tsx"), 'icon="Github"');
+  const clean = await buildPlan(f.ctx);
+  assert.deepEqual(clean.skipped, []);
+  await assert.rejects(applyPlan(f.ctx, p.approval), /stale/i);
+  await applyPlan(f.ctx, clean.approval);
+  assert.equal((await verify(f.ctx)).configurationMatches, true);
+});
+test("a dirty Git plugin is skipped while other targets still apply", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process");
+  f.manifest.plugins.push({
+    id: "firstmate",
+    source: "npm:@gpambrozio/paseo-firstmate",
+    revision: "0.4.0",
+    enabled: true,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const row = (await f.adapter.list())[0];
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", row.path, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = sha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows.find((x) => x.id === "better-paseo").installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha,
+    };
+    return rows;
+  };
+  await writeFile(path.join(row.path, "extra.ts"), "local experiment");
+  const p = await buildPlan(f.ctx);
+  assert.deepEqual(p.conflicts, []);
+  assert.deepEqual(p.skipped, [
+    {
+      plugin: "better-paseo",
+      reason: "local-source-changes",
+      files: ["extra.ts"],
+      checkout: row.path,
+    },
+  ]);
+  assert.deepEqual(
+    p.changes.map((c) => ({ plugin: c.plugin, actions: c.actions })),
+    [{ plugin: "firstmate", actions: ["install"] }],
+  );
+  const result = await applyPlan(f.ctx, p.approval);
+  assert.equal(result.changed, true);
+  assert.ok(f.calls.some((x) => x[0] === "install" && x[1] === "firstmate"));
+  assert.ok(!f.calls.some((x) => x[1] === "better-paseo"));
+  assert.equal(
+    await readFile(path.join(row.path, "extra.ts"), "utf8"),
+    "local experiment",
+  );
+  // The skipped plugin's pending settings write is not applied either.
+  await assert.rejects(readFile(f.setting));
+  assert.equal(result.verification.configurationMatches, true);
+  assert.equal(
+    (await f.adapter.list()).some((x) => x.id === "firstmate"),
+    true,
+  );
+});
+test("a Git HEAD drift skips as head-differs with the drifted revision disclosed", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process");
+  const row = (await f.adapter.list())[0];
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", row.path, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = sha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha,
+    };
+    return rows;
+  };
+  await writeJson(f.setting, f.target);
+  await writeFile(path.join(row.path, "index.client.tsx"), 'icon="Two"');
+  git("commit", "-qam", "two");
+  const drifted = git("rev-parse", "HEAD");
+  const p = await buildPlan(f.ctx);
+  assert.deepEqual(p.conflicts, []);
+  assert.deepEqual(p.skipped, [
+    {
+      plugin: "better-paseo",
+      reason: "head-differs",
+      head: drifted,
+      revision: sha,
+      checkout: row.path,
+    },
+  ]);
+  const result = await applyPlan(f.ctx, p.approval);
+  assert.equal(result.changed, false);
   assert.deepEqual(f.calls, []);
 });
 test("legacy schema v1 backups without Git source metadata remain restorable when source is clean", async (t) => {
