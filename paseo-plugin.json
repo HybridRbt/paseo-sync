@@ -4,5 +4,11 @@
   "description": "Sync plugins and allowlisted settings through your own Git repository",
   "requirements": {
     "paseo": ">=0.11.4 <0.16.0"
-  }
+  },
+  "media": [
+    "assets/screenshots/01-first-run-checklist.png",
+    "assets/screenshots/02-sync-preview-confirm.png",
+    "assets/screenshots/03-recovery-view.png"
+  ]
 }
+

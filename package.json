@@ -1,7 +1,7 @@
 {
   "name": "paseo-sync",
   "private": true,
-  "version": "0.1.3",
+  "version": "0.1.4",
   "files": [
     "paseo-plugin.json",
     "OVERVIEW.md",
@@ -13,6 +13,7 @@
     "server/",
     "shared/",
     "tools/",
+    "assets/",
     "README.md",
     "LICENSE"
   ],
