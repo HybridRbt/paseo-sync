@@ -5,6 +5,13 @@ const english = {
     "Skipped {plugin}: local source has uncommitted changes; its changes are not published this time.",
   "跳过 {plugin}：本机源码与安装版本不一致，本次不发布它的变更。":
     "Skipped {plugin}: local source HEAD differs from the installed revision; its changes are not published this time.",
+  "跳过 {plugin}：本地源码有未提交改动，本次不应用到本机。":
+    "Skipped {plugin}: local source has uncommitted changes; it is not applied to this host this time.",
+  "跳过 {plugin}：本机源码与安装版本不一致，本次不应用到本机。":
+    "Skipped {plugin}: local source HEAD differs from the installed revision; it is not applied to this host this time.",
+  "本机源码目录：{checkout}": "Local source checkout: {checkout}",
+  "该插件本次保持本机现状，未被同步修改。在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览差异即可同步新版本。":
+    "The plugin keeps its local state untouched this run. Commit and push in the plugin's source repository, run paseo plugin update {plugin}, then preview changes again to sync the new revision.",
   "改动文件：{files}": "Changed files: {files}",
   "配置仓库沿用该插件已发布的版本。":
     "The configuration repository keeps this plugin's previously published version.",
