@@ -199,6 +199,104 @@ function comparable(s, includeSource = true) {
     patches: s.patches,
   };
 }
+function backupDrift(a, c, currentState = null) {
+  if (!a || !c) return null;
+  if (same(a, c)) return null;
+
+  const plugins = [];
+  const source = [];
+  const settings = [];
+
+  const allPluginIds = new Set([
+    ...Object.keys(a.plugins),
+    ...Object.keys(c.plugins),
+  ]);
+  for (const id of allPluginIds) {
+    const ap = a.plugins[id];
+    const cp = c.plugins[id];
+    if (same(ap, cp)) continue;
+
+    const apDesc = ap ? { descriptor: ap.descriptor, status: ap.status } : null;
+    const cpDesc = cp ? { descriptor: cp.descriptor, status: cp.status } : null;
+
+    if (!same(ap?.sourceState, cp?.sourceState)) {
+      const curPlugin = currentState?.plugins?.[id];
+      const curSource = cp?.sourceState;
+      const prevSource = ap?.sourceState;
+      const isDirty = curSource?.clean === false;
+      const headMismatch =
+        Boolean(curSource?.head && curPlugin?.descriptor?.revision) &&
+        curSource.head !== curPlugin.descriptor.revision;
+      if (isDirty || headMismatch) {
+        const reason = isDirty
+          ? (headMismatch ? "head-differs" : "local-source-changes")
+          : "head-differs";
+        source.push({
+          plugin: id,
+          reason,
+          files: curSource?.changed ?? [],
+          head: curSource?.head ?? null,
+          checkout: curPlugin?.path ?? null,
+        });
+      } else if (prevSource?.clean === false) {
+        source.push({
+          plugin: id,
+          reason: "recorded-source-dirty",
+          files: prevSource?.changed ?? [],
+          head: curSource?.head ?? prevSource?.head ?? null,
+          checkout: curPlugin?.path ?? null,
+        });
+      } else if (same(apDesc, cpDesc) && prevSource?.head !== curSource?.head) {
+        source.push({
+          plugin: id,
+          reason: "head-differs",
+          files: [],
+          head: curSource?.head ?? null,
+          checkout: curPlugin?.path ?? null,
+        });
+      }
+    }
+
+    if (!same(apDesc, cpDesc)) {
+      plugins.push({
+        plugin: id,
+        from: apDesc,
+        to: cpDesc,
+      });
+    }
+  }
+
+  const allSettingsFiles = new Set([
+    ...Object.keys(a.settings || {}),
+    ...Object.keys(c.settings || {}),
+  ]);
+  for (const file of allSettingsFiles) {
+    if (!same(a.settings[file], c.settings[file])) {
+      settings.push(file);
+    }
+  }
+
+  const allPatchKeys = new Set([
+    ...Object.keys(a.patches || {}),
+    ...Object.keys(c.patches || {}),
+  ]);
+  const patches = [];
+  for (const key of allPatchKeys) {
+    if (!same(a.patches[key], c.patches[key])) {
+      patches.push(key);
+    }
+  }
+
+  return {
+    plugins,
+    source,
+    settings,
+    patches,
+    ...(a.pluginsEnabled !== c.pluginsEnabled
+      ? { pluginsEnabled: { from: a.pluginsEnabled, to: c.pluginsEnabled } }
+      : {}),
+  };
+}
 async function baseline(ctx) {
   return jsonOrNull(await safeFile(ctx.state, "baseline.json"));
 }
@@ -667,15 +765,40 @@ export async function restorePlan(ctx, id) {
     Object.values(b.after.plugins)
       .filter(Boolean)
       .every((p) => Object.hasOwn(p, "sourceState"));
-  const conflicts = [];
+  const conflicts = [],
+    skipped = [];
   if (b.after === null || b.status === "pending" || b.status === "restoring")
     conflicts.push(
       "Interrupted backup has no verified final state; inspect daemon state before restoring.",
     );
   for (const [plugin, before] of Object.entries(b.before.plugins)) {
     const now = current.plugins[plugin];
-    if (now?.sourceState?.clean === false)
-      conflicts.push(`Local source edits prevent restoring ${plugin}`);
+    // Restoring reinstalls the pinned revision and rewrites patched files,
+    // which would destroy uncommitted local edits. The dirty plugin keeps
+    // its local state instead, disclosed with its files, checkout and
+    // repair guidance, exactly like publish and apply; everything else
+    // restores.
+    if (now?.sourceState?.clean === false) {
+      skipped.push(
+        now.sourceState.head === now.descriptor.revision
+          ? {
+              plugin,
+              reason: "local-source-changes",
+              files: now.sourceState.changed,
+              checkout: now.path,
+              restore: true,
+            }
+          : {
+              plugin,
+              reason: "head-differs",
+              head: now.sourceState.head,
+              revision: now.descriptor.revision,
+              checkout: now.path,
+              restore: true,
+            },
+      );
+      continue;
+    }
     if (before) {
       const conflict = transitionConflict(
         now?.descriptor ?? null,
@@ -685,29 +808,63 @@ export async function restorePlan(ctx, id) {
       if (conflict) conflicts.push(conflict);
     }
   }
+  const skippedIds = new Set(skipped.map((s) => s.plugin));
+  // A dirty local source is outside the snapshot guard whether this preview
+  // discloses it as a skip or the operation's own final snapshot recorded it
+  // dirty (a failed apply, or a restore that skipped the plugin and captured
+  // the divergence): the repair guidance tells the user to resolve the
+  // checkout and preview again, so neither the dirtiness nor its resolution
+  // may invalidate the backup. Its patch entries are the same checkout bytes,
+  // so they leave with it. Settings and every other plugin stay guarded.
+  const outsideGuard = new Set(
+    [current, b.after]
+      .filter(Boolean)
+      .flatMap((s) =>
+        Object.entries(s.plugins)
+          .filter(([, p]) => p?.sourceState?.clean === false)
+          .map(([plugin]) => plugin),
+      ),
+  );
+  const guarded = (s) => {
+    const c = comparable(s, includesSourceMetadata);
+    if (!outsideGuard.size) return c;
+    return {
+      ...c,
+      plugins: Object.fromEntries(
+        Object.entries(c.plugins).filter(([p]) => !outsideGuard.has(p)),
+      ),
+      patches: Object.fromEntries(
+        Object.entries(c.patches).filter(
+          ([key]) => !outsideGuard.has(key.split("/")[0]),
+        ),
+      ),
+    };
+  };
+  const drift =
+    b.after !== null
+      ? backupDrift(guarded(b.after), guarded(current), current)
+      : null;
   return {
     backupId: id,
-    changes: b.profile.manifest.plugins.map((p) => ({
-      plugin: p.id,
-      actions: ["restore"],
-      from: current.plugins[p.id]?.descriptor ?? null,
-      to: b.before.plugins[p.id]?.descriptor ?? { ...p, enabled: false },
-      settings: b.profile.settings
-        .filter((s) => s.plugin === p.id)
-        .map((s) => ({
-          document: s.document,
-          before: parsed(current.settings[s.file]),
-          after: parsed(b.before.settings[s.file]),
-        })),
-    })),
+    changes: b.profile.manifest.plugins
+      .filter((p) => !skippedIds.has(p.id))
+      .map((p) => ({
+        plugin: p.id,
+        actions: ["restore"],
+        from: current.plugins[p.id]?.descriptor ?? null,
+        to: b.before.plugins[p.id]?.descriptor ?? { ...p, enabled: false },
+        settings: b.profile.settings
+          .filter((s) => s.plugin === p.id)
+          .map((s) => ({
+            document: s.document,
+            before: parsed(current.settings[s.file]),
+            after: parsed(b.before.settings[s.file]),
+          })),
+      })),
     approval: objectHash({ backup: b, current: comparable(current) }),
     conflicts,
-    currentChangedSinceBackup:
-      b.after !== null &&
-      !same(
-        comparable(current, includesSourceMetadata),
-        comparable(b.after, includesSourceMetadata),
-      ),
+    skipped,
+    currentChangedSinceBackup: drift ? drift : false,
     warnings: [
       "Restore may reinstall previous pinned versions using the network. New plugins are disabled and retained to preserve their data.",
     ],
@@ -723,11 +880,31 @@ export async function restore(ctx, id, approval) {
     const preview = await restorePlan(ctx, id);
     if (preview.approval !== approval) throw new Error("Restore plan is stale");
     if (preview.conflicts.length) throw new Error(preview.conflicts.join("\n"));
-    if (preview.currentChangedSinceBackup)
+    if (preview.currentChangedSinceBackup) {
+      const d = preview.currentChangedSinceBackup;
+      const details = [];
+      if (typeof d === "object" && d !== null) {
+        if (d.source?.length)
+          details.push(`source: ${d.source.map((s) => s.plugin).join(", ")}`);
+        if (d.plugins?.length)
+          details.push(`plugins: ${d.plugins.map((p) => p.plugin).join(", ")}`);
+        if (d.settings?.length)
+          details.push(`settings: ${d.settings.join(", ")}`);
+        if (d.patches?.length)
+          details.push(`patches: ${d.patches.join(", ")}`);
+        if (d.pluginsEnabled)
+          details.push(
+            `pluginsEnabled: ${d.pluginsEnabled.from} -> ${d.pluginsEnabled.to}`,
+          );
+      }
       throw new Error(
-        "Current managed data changed after the operation; resolve those changes before restoring.",
+        `Current managed data changed after the operation; resolve those changes before restoring.${details.length ? ` (${details.join(", ")})` : ""}`,
       );
+    }
     const b = preview._backup;
+    // Dirty local sources disclosed by the preview keep their local state:
+    // the restore loop and its verification leave them entirely alone.
+    const skippedIds = new Set(preview.skipped.map((s) => s.plugin));
     backup = b;
     b.operationAfter ??= b.after;
     b.status = "restoring";
@@ -746,6 +923,7 @@ export async function restore(ctx, id, approval) {
       }
     };
     for (const target of b.profile.manifest.plugins) {
+      if (skippedIds.has(target.id)) continue;
       b.phase = `restore:${target.id}`;
       await writeJson(await backupFile(ctx, id), b);
       const before = b.before.plugins[target.id];
@@ -815,6 +993,7 @@ export async function restore(ctx, id, approval) {
     const restored = await capture(ctx, b.profile);
     for (const p of b.profile.manifest.plugins)
       if (b.before.plugins[p.id]) {
+        if (skippedIds.has(p.id)) continue;
         if (
           !same(
             pluginIdentity(restored.plugins[p.id]?.descriptor),

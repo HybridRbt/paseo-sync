@@ -13,7 +13,13 @@ import { ScrollView, Text, View, Pressable } from "react-native";
 import { syncSettings } from "../shared/settings";
 import { startRpc, jobRpc, unlockRpc, discoverRpc } from "../shared/rpc";
 import type { z } from "zod";
-import { translator, readLanguage, saveLanguage } from "./i18n.mjs";
+import {
+  translator,
+  readLanguage,
+  saveLanguage,
+  canConfirmPreview,
+  renderDriftDisclosure,
+} from "./i18n.mjs";
 import { mergeDiscovery, editCheckout } from "../shared/onboarding.mjs";
 import {
   actionGate,
@@ -47,12 +53,28 @@ type Job = {
   backupId?: string;
   result?: unknown;
 };
-type Preview = {
+export type Preview = {
   approval?: string;
   confirmKind?: Request["kind"];
   backupId?: string;
   conflicts?: string[];
+  currentChangedSinceBackup?:
+    | boolean
+    | {
+        plugins?: { plugin: string; from?: unknown; to?: unknown }[];
+        source?: {
+          plugin: string;
+          reason?: string;
+          files?: string[];
+          head?: string | null;
+          checkout?: string | null;
+        }[];
+        settings?: string[];
+        patches?: string[];
+        pluginsEnabled?: { from: boolean; to: boolean };
+      };
 };
+export { canConfirmPreview, renderDriftDisclosure };
 // The first-time setup sequence shown at the top of the screen. Labels use the
 // same wording as the matching actions below.
 const SETUP_LABEL: Record<string, string> = {
@@ -262,8 +284,7 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
   const preview = (
     result && typeof result === "object" ? result : {}
   ) as Preview;
-  const canConfirm =
-    !!preview.approval && !!preview.confirmKind && !preview.conflicts?.length;
+  const canConfirm = canConfirmPreview(preview);
   const text = { color: theme.colors.foreground };
   const muted = { color: theme.colors.foregroundMuted };
   const fields = [
@@ -782,7 +803,7 @@ function jobProgress(job: Job | null): number {
   return PHASE_PROGRESS[job.phase ?? ""] ?? 0.1;
 }
 
-function ResultSummary({
+export function ResultSummary({
   value,
   color,
   t,
@@ -793,6 +814,7 @@ function ResultSummary({
 }) {
   const r = (value ?? {}) as {
     conflicts?: string[];
+    currentChangedSinceBackup?: Preview["currentChangedSinceBackup"];
     skipped?: {
       plugin: string;
       reason: string;
@@ -802,6 +824,9 @@ function ResultSummary({
       published?: boolean;
       // Present only on apply-side skips: the local checkout left untouched.
       checkout?: string;
+      // Present only on restore-side skips: the same dirty checkout
+      // disclosure, with restore-specific repair guidance.
+      restore?: boolean;
     }[];
     changes?: {
       plugin: string;
@@ -841,9 +866,51 @@ function ResultSummary({
           {c}
         </Text>
       ))}
+      {r.currentChangedSinceBackup ? (
+        <View style={{ gap: 4 }}>
+          {renderDriftDisclosure(r.currentChangedSinceBackup, t).map(
+            (line: string, idx: number) => (
+              <Text
+                selectable
+                key={idx}
+                style={[text, idx > 0 ? { paddingLeft: 8 } : null]}
+              >
+                {line}
+              </Text>
+            ),
+          )}
+        </View>
+      ) : null}
       {r.skipped?.map((s) =>
         s.reason === "local-source-changes" || s.reason === "head-differs" ? (
-          s.checkout !== undefined ? (
+          s.restore ? (
+            // Restore side: reinstalling the pinned revision would destroy
+            // the local edits, so the dirty plugin keeps its local state and
+            // the disclosure shows how to converge before restoring.
+            <View key={s.plugin} style={{ gap: 4 }}>
+              <Text selectable style={text}>
+                {t(
+                  s.reason === "head-differs"
+                    ? "跳过 {plugin}：本机源码与安装版本不一致，本次恢复不改动该插件。"
+                    : "跳过 {plugin}：本地源码有未提交改动，本次恢复不改动该插件。",
+                  { plugin: s.plugin },
+                )}
+                {s.files?.length
+                  ? " " +
+                    t("改动文件：{files}", { files: s.files.join(", ") })
+                  : ""}
+              </Text>
+              <Text selectable style={text}>
+                {t("本机源码目录：{checkout}", { checkout: s.checkout })}
+              </Text>
+              <Text selectable style={text}>
+                {t(
+                  "该插件本次保持本机现状，未被恢复修改。完成本次恢复后，在插件源码仓库提交并推送，运行 paseo plugin update {plugin}，再重新预览恢复即可恢复备份中的版本。",
+                  { plugin: s.plugin },
+                )}
+              </Text>
+            </View>
+          ) : s.checkout !== undefined ? (
             // Apply side: the dirty local source keeps its local state; the
             // checkout path and repair steps tell the user how to converge.
             <View key={s.plugin} style={{ gap: 4 }}>
