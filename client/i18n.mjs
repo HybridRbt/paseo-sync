@@ -1,6 +1,8 @@
 const english = {
   "跳过 {plugin}：本机未安装，配置要求保持禁用。":
     "Skip {plugin}: not installed on this host and disabled in the profile.",
+  "跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。":
+    "Skipped {plugin}: local development or untracked plugin; its changes are not published this time.",
   "跳过 {plugin}：本地源码有未提交改动，本次不发布它的变更。":
     "Skipped {plugin}: local source has uncommitted changes; its changes are not published this time.",
   "跳过 {plugin}：本机源码与安装版本不一致，本次不发布它的变更。":

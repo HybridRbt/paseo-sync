@@ -242,6 +242,31 @@ test("publish includes a Git plugin whose only local change is an install-genera
   assert.ok(entry);
   assert.equal(entry.revision, revision);
 });
+test("publish preview discloses skipped untracked plugins instead of failing", async () => {
+  const f = await fixture();
+  f.rows.push({
+    id: "flowly",
+    enabled: true,
+    status: "running",
+    path: "/tmp/flowly",
+    installation: {
+      identity: {
+        kind: "directory",
+        path: "/tmp/flowly",
+      },
+    },
+  });
+  const p = await repository.publishPlan(f);
+  assert.deepEqual(p.skipped, [
+    { plugin: "flowly", reason: "untracked" },
+  ]);
+  await repository.publish(f, p.approval, { push: false });
+  const manifest = JSON.parse(
+    await readFile(path.join(f.root, "profile.json"), "utf8"),
+  );
+  assert.ok(!manifest.plugins.some((x) => x.id === "flowly"));
+  assert.ok(manifest.plugins.some((x) => x.id === "demo"));
+});
 test("a publish approval becomes stale when a skipped plugin recovers, even if files match", async () => {
   const f = await fixture(),
     dir = path.join(f.home, "hot");

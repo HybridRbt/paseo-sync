@@ -1147,6 +1147,19 @@ export function ResultSummary({
               </Text>
             </View>
           )
+        ) : s.reason === "untracked" ? (
+          <View key={s.plugin} style={{ gap: 4 }}>
+            <Text selectable style={text}>
+              {t("跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。", {
+                plugin: s.plugin,
+              })}
+            </Text>
+            <Text selectable style={text}>
+              {s.published
+                ? t("配置仓库沿用该插件已发布的版本。")
+                : t("该插件尚未发布过，本次不出现在配置中。")}
+            </Text>
+          </View>
         ) : (
           <Text key={s.plugin} style={text}>
             {t("跳过 {plugin}：本机未安装，配置要求保持禁用。", {

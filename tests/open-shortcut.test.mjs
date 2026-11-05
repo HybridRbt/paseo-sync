@@ -247,6 +247,12 @@ test("bilingual translations cover all checkout shortcut labels and feedback", a
       "当前平台不支持该快捷方式。",
     ],
     ["未知错误", "Unknown error", "未知错误"],
+    [
+      "跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。",
+      "Skipped my-plugin: local development or untracked plugin; its changes are not published this time.",
+      "跳过 my-plugin：本地开发或未受管插件，本次不发布它的变更。",
+      { plugin: "my-plugin" },
+    ],
   ];
 
   for (const [key, expectedEn, expectedZh, params] of keys) {

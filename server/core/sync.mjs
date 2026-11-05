@@ -135,9 +135,15 @@ async function capture(ctx, profile) {
     patches = {};
   for (const p of profile.manifest.plugins) {
     const row = byId.get(p.id);
+    let descriptor = null;
+    if (row) {
+      try {
+        descriptor = snapshotPlugin(row);
+      } catch {}
+    }
     plugins[p.id] = row
       ? {
-          descriptor: snapshotPlugin(row),
+          descriptor,
           path: row.path,
           status: row.status,
           sourceState: await sourceState(row, profile),

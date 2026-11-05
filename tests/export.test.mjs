@@ -62,11 +62,30 @@ test("export includes only portable sources and allowlisted settings, never cred
   );
   assert.ok(!setting.includes("private-"));
 });
-test("export refuses unknown installation identity without creating a manifest", async () => {
+test("export skips untracked plugin without portable identity instead of refusing", async () => {
   const ctx = await fixture();
   ctx.rows.push({ id: "mystery", enabled: true, path: "/tmp/unknown" });
-  await assert.rejects(exportProfile(ctx), /untracked/i);
-  await assert.rejects(readFile(path.join(ctx.root, "profile.json")));
+  const result = await exportProfile(ctx);
+  assert.deepEqual(result.skipped, [{ plugin: "mystery", reason: "untracked" }]);
+  const manifest = JSON.parse(
+    await readFile(path.join(ctx.root, "profile.json"), "utf8"),
+  );
+  assert.deepEqual(manifest.plugins.map((p) => p.id), ["better-paseo"]);
+});
+test("export keeps previously published entry for an untracked plugin", async () => {
+  const ctx = await fixture();
+  await exportProfile(ctx);
+  ctx.rows.length = 0;
+  ctx.rows.push({ id: "better-paseo", enabled: true, path: "/tmp/local-dev" });
+  const result = await exportProfile(ctx);
+  assert.deepEqual(result.skipped, [
+    { plugin: "better-paseo", reason: "untracked", published: true },
+  ]);
+  const manifest = JSON.parse(
+    await readFile(path.join(ctx.root, "profile.json"), "utf8"),
+  );
+  assert.equal(manifest.plugins.length, 1);
+  assert.equal(manifest.plugins[0].id, "better-paseo");
 });
 test("repository guard refuses tracked work and commits behind upstream", async () => {
   const ctx = await fixture();

@@ -146,6 +146,7 @@ const flags = [
   "compactReplySpacing",
   "autoUpdateCheck",
   "blockDetails",
+  "chatEnabled",
 ];
 export function validateSettings(plugin, document, d) {
   check(
@@ -261,6 +262,14 @@ export function patchText(raw, spec) {
     `Patch result hash mismatch: ${spec.path}`,
   );
   return out;
+}
+export function isPortablePlugin(row) {
+  try {
+    snapshotPlugin(row);
+    return true;
+  } catch {
+    return false;
+  }
 }
 export function snapshotPlugin(row) {
   const i = row.installation;
