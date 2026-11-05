@@ -598,15 +598,40 @@ export async function restorePlan(ctx, id) {
     Object.values(b.after.plugins)
       .filter(Boolean)
       .every((p) => Object.hasOwn(p, "sourceState"));
-  const conflicts = [];
+  const conflicts = [],
+    skipped = [];
   if (b.after === null || b.status === "pending" || b.status === "restoring")
     conflicts.push(
       "Interrupted backup has no verified final state; inspect daemon state before restoring.",
     );
   for (const [plugin, before] of Object.entries(b.before.plugins)) {
     const now = current.plugins[plugin];
-    if (now?.sourceState?.clean === false)
-      conflicts.push(`Local source edits prevent restoring ${plugin}`);
+    // Restoring reinstalls the pinned revision and rewrites patched files,
+    // which would destroy uncommitted local edits. The dirty plugin keeps
+    // its local state instead, disclosed with its files, checkout and
+    // repair guidance, exactly like publish and apply; everything else
+    // restores.
+    if (now?.sourceState?.clean === false) {
+      skipped.push(
+        now.sourceState.head === now.descriptor.revision
+          ? {
+              plugin,
+              reason: "local-source-changes",
+              files: now.sourceState.changed,
+              checkout: now.path,
+              restore: true,
+            }
+          : {
+              plugin,
+              reason: "head-differs",
+              head: now.sourceState.head,
+              revision: now.descriptor.revision,
+              checkout: now.path,
+              restore: true,
+            },
+      );
+      continue;
+    }
     if (before) {
       const conflict = transitionConflict(
         now?.descriptor ?? null,
@@ -616,23 +641,27 @@ export async function restorePlan(ctx, id) {
       if (conflict) conflicts.push(conflict);
     }
   }
+  const skippedIds = new Set(skipped.map((s) => s.plugin));
   return {
     backupId: id,
-    changes: b.profile.manifest.plugins.map((p) => ({
-      plugin: p.id,
-      actions: ["restore"],
-      from: current.plugins[p.id]?.descriptor ?? null,
-      to: b.before.plugins[p.id]?.descriptor ?? { ...p, enabled: false },
-      settings: b.profile.settings
-        .filter((s) => s.plugin === p.id)
-        .map((s) => ({
-          document: s.document,
-          before: parsed(current.settings[s.file]),
-          after: parsed(b.before.settings[s.file]),
-        })),
-    })),
+    changes: b.profile.manifest.plugins
+      .filter((p) => !skippedIds.has(p.id))
+      .map((p) => ({
+        plugin: p.id,
+        actions: ["restore"],
+        from: current.plugins[p.id]?.descriptor ?? null,
+        to: b.before.plugins[p.id]?.descriptor ?? { ...p, enabled: false },
+        settings: b.profile.settings
+          .filter((s) => s.plugin === p.id)
+          .map((s) => ({
+            document: s.document,
+            before: parsed(current.settings[s.file]),
+            after: parsed(b.before.settings[s.file]),
+          })),
+      })),
     approval: objectHash({ backup: b, current: comparable(current) }),
     conflicts,
+    skipped,
     currentChangedSinceBackup:
       b.after !== null &&
       !same(
@@ -659,6 +688,9 @@ export async function restore(ctx, id, approval) {
         "Current managed data changed after the operation; resolve those changes before restoring.",
       );
     const b = preview._backup;
+    // Dirty local sources disclosed by the preview keep their local state:
+    // the restore loop and its verification leave them entirely alone.
+    const skippedIds = new Set(preview.skipped.map((s) => s.plugin));
     backup = b;
     b.operationAfter ??= b.after;
     b.status = "restoring";
@@ -677,6 +709,7 @@ export async function restore(ctx, id, approval) {
       }
     };
     for (const target of b.profile.manifest.plugins) {
+      if (skippedIds.has(target.id)) continue;
       b.phase = `restore:${target.id}`;
       await writeJson(await backupFile(ctx, id), b);
       const before = b.before.plugins[target.id];
@@ -746,6 +779,7 @@ export async function restore(ctx, id, approval) {
     const restored = await capture(ctx, b.profile);
     for (const p of b.profile.manifest.plugins)
       if (b.before.plugins[p.id]) {
+        if (skippedIds.has(p.id)) continue;
         if (
           !same(
             pluginIdentity(restored.plugins[p.id]?.descriptor),

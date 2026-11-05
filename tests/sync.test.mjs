@@ -643,6 +643,171 @@ test("a Git HEAD drift skips as head-differs with the drifted revision disclosed
   assert.equal(result.changed, false);
   assert.deepEqual(f.calls, []);
 });
+test("a dirty Git plugin is skipped at restore with disclosed files and checkout", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process");
+  const row = (await f.adapter.list())[0];
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", row.path, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = sha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha,
+    };
+    return rows;
+  };
+  const p = await buildPlan(f.ctx),
+    r = await applyPlan(f.ctx, p.approval),
+    file = path.join(f.state, "backups", r.backupId + ".json"),
+    b = JSON.parse(await readFile(file, "utf8"));
+  // Simulate a backup written before source-state metadata existed: local
+  // dirtiness then does not count as a post-operation change, so the dirty
+  // checkout must be disclosed as a skip instead of dead-ending the restore.
+  for (const state of [b.before, b.after])
+    for (const plugin of Object.values(state.plugins))
+      if (plugin) delete plugin.sourceState;
+  await writeJson(file, b);
+  f.calls.length = 0;
+  await writeFile(path.join(row.path, "extra.ts"), "local experiment");
+  const preview = await restorePlan(f.ctx, r.backupId);
+  assert.deepEqual(preview.conflicts, []);
+  assert.equal(preview.currentChangedSinceBackup, false);
+  assert.deepEqual(preview.skipped, [
+    {
+      plugin: "better-paseo",
+      reason: "local-source-changes",
+      files: ["extra.ts"],
+      checkout: row.path,
+      restore: true,
+    },
+  ]);
+  assert.deepEqual(preview.changes, []);
+  // The client disclosure renders the files, checkout and repair guidance
+  // in both languages from the actual skipped entry.
+  const { translator } = await import("../client/i18n.mjs");
+  const entry = preview.skipped[0],
+    skipLine =
+      "跳过 {plugin}：本地源码有未提交改动，本次恢复不改动该插件。",
+    guidance =
+      "该插件本次保持本机现状，未被恢复修改。在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览恢复即可恢复备份中的版本。";
+  for (const language of ["zh", "en"]) {
+    const t = translator(language),
+      rendered = [
+        t(skipLine, { plugin: entry.plugin }),
+        t("改动文件：{files}", { files: entry.files.join(", ") }),
+        t("本机源码目录：{checkout}", { checkout: entry.checkout }),
+        t(guidance, { plugin: entry.plugin }),
+      ].join("\n");
+    for (const expected of [
+      entry.plugin,
+      entry.files[0],
+      entry.checkout,
+      "paseo plugin update",
+    ])
+      assert.ok(rendered.includes(expected), `${language}: ${expected}`);
+  }
+  assert.notEqual(
+    translator("en")(guidance, { plugin: entry.plugin }),
+    guidance,
+  );
+  const restored = await restore(f.ctx, r.backupId, preview.approval);
+  assert.equal(restored.restored, true);
+  assert.deepEqual(restored.retainedDisabledPlugins, []);
+  assert.deepEqual(f.calls, []);
+  assert.equal(
+    await readFile(path.join(row.path, "extra.ts"), "utf8"),
+    "local experiment",
+  );
+  // The skipped plugin's settings are not rolled back either.
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), f.target);
+  assert.equal((await f.adapter.list())[0].enabled, true);
+});
+test("a drifted Git HEAD skips at restore as head-differs and keeps the local source", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process");
+  const row = (await f.adapter.list())[0];
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", row.path, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = sha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha,
+    };
+    return rows;
+  };
+  const p = await buildPlan(f.ctx),
+    r = await applyPlan(f.ctx, p.approval),
+    file = path.join(f.state, "backups", r.backupId + ".json"),
+    b = JSON.parse(await readFile(file, "utf8"));
+  for (const state of [b.before, b.after])
+    for (const plugin of Object.values(state.plugins))
+      if (plugin) delete plugin.sourceState;
+  await writeJson(file, b);
+  f.calls.length = 0;
+  await writeFile(path.join(row.path, "index.client.tsx"), 'icon="Two"');
+  git("commit", "-qam", "two");
+  const drifted = git("rev-parse", "HEAD");
+  const preview = await restorePlan(f.ctx, r.backupId);
+  assert.deepEqual(preview.conflicts, []);
+  assert.deepEqual(preview.skipped, [
+    {
+      plugin: "better-paseo",
+      reason: "head-differs",
+      head: drifted,
+      revision: sha,
+      checkout: row.path,
+      restore: true,
+    },
+  ]);
+  const { translator } = await import("../client/i18n.mjs");
+  const headLine =
+    "跳过 {plugin}：本机源码与安装版本不一致，本次恢复不改动该插件。";
+  assert.ok(
+    translator("en")(headLine, { plugin: "better-paseo" }).includes(
+      "better-paseo",
+    ),
+  );
+  assert.notEqual(
+    translator("en")(headLine, { plugin: "better-paseo" }),
+    headLine,
+  );
+  await restore(f.ctx, r.backupId, preview.approval);
+  assert.equal(
+    await readFile(path.join(row.path, "index.client.tsx"), "utf8"),
+    'icon="Two"',
+  );
+  assert.deepEqual(f.calls, []);
+});
 test("legacy schema v1 backups without Git source metadata remain restorable when source is clean", async (t) => {
   const f = await fixture(t, { installed: true }),
     { execFileSync } = await import("node:child_process"),
