@@ -4,6 +4,7 @@ import { mkdtemp, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import * as service from "../server/service.mjs";
 import { writeJson } from "../server/core/files.mjs";
 async function fixture() {
@@ -136,4 +137,32 @@ test("service.openCheckout dispatches shortcut open to openShortcut handler", as
   assert.equal(opened.length, 1);
   assert.equal(opened[0].cmd, "/usr/bin/open");
   assert.deepEqual(opened[0].args, ["-a", "Terminal", f.settings.checkout]);
+});
+
+test("service.openCheckout dispatches shortcut open to openShortcut handler with spawn", async () => {
+  const f = await fixture();
+  const spawned = [];
+  const s = service.createService({
+    ...f,
+    openShortcutOptions: {
+      platform: "linux",
+      env: { TERMINAL: "xterm" },
+      spawn: (cmd, args, opts) => {
+        spawned.push({ cmd, args, opts });
+        const child = new EventEmitter();
+        child.unref = () => {};
+        process.nextTick(() => child.emit("spawn"));
+        return child;
+      },
+    },
+  });
+  const res = await s.openCheckout({
+    path: f.settings.checkout,
+    target: "terminal",
+  });
+  assert.deepEqual(res, { status: "opened" });
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].cmd, "xterm");
+  assert.deepEqual(spawned[0].args, []);
+  assert.equal(spawned[0].opts.cwd, f.settings.checkout);
 });

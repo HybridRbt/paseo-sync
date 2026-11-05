@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import {
   resolveOpenCommand,
   openShortcut,
@@ -13,21 +14,24 @@ test("resolveOpenCommand resolves platform-appropriate commands for fileManager 
   assert.deepEqual(resolveOpenCommand("darwin", "fileManager", "/my/checkout"), {
     command: "/usr/bin/open",
     args: ["/my/checkout"],
+    cwd: "/my/checkout",
   });
   assert.deepEqual(resolveOpenCommand("darwin", "terminal", "/my/checkout"), {
     command: "/usr/bin/open",
     args: ["-a", "Terminal", "/my/checkout"],
+    cwd: "/my/checkout",
   });
 
   // Windows
   assert.deepEqual(resolveOpenCommand("win32", "fileManager", "C:\\checkout"), {
     command: "explorer.exe",
     args: ["C:\\checkout"],
-    windowsVerbatimArguments: true,
+    cwd: "C:\\checkout",
   });
   assert.deepEqual(resolveOpenCommand("win32", "terminal", "C:\\checkout"), {
     command: "cmd.exe",
-    args: ["/c", "start", "cmd.exe", "/K", 'cd /d "C:\\checkout"'],
+    args: ["/c", "start", "cmd.exe"],
+    cwd: "C:\\checkout",
   });
 
   // Linux default
@@ -36,23 +40,36 @@ test("resolveOpenCommand resolves platform-appropriate commands for fileManager 
     {
       command: "xdg-open",
       args: ["/home/user/checkout"],
+      cwd: "/home/user/checkout",
     },
   );
   assert.deepEqual(
     resolveOpenCommand("linux", "terminal", "/home/user/checkout", {}),
     {
       command: "x-terminal-emulator",
-      args: ["--working-directory=/home/user/checkout"],
+      args: [],
+      cwd: "/home/user/checkout",
     },
   );
-  // Linux with custom TERMINAL env
+  // Linux with custom TERMINAL env (e.g. xterm, kitty)
+  assert.deepEqual(
+    resolveOpenCommand("linux", "terminal", "/home/user/checkout", {
+      TERMINAL: "xterm",
+    }),
+    {
+      command: "xterm",
+      args: [],
+      cwd: "/home/user/checkout",
+    },
+  );
   assert.deepEqual(
     resolveOpenCommand("linux", "terminal", "/home/user/checkout", {
       TERMINAL: "kitty",
     }),
     {
       command: "kitty",
-      args: ["--working-directory=/home/user/checkout"],
+      args: [],
+      cwd: "/home/user/checkout",
     },
   );
 
@@ -77,33 +94,73 @@ test("openShortcut rejects invalid, relative, or non-existent directories", asyn
   });
 });
 
-test("openShortcut executes command via execFile and handles success and errors", async () => {
+test("openShortcut executes command via spawn and resolves on launch without waiting for process exit", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "open-test-"));
+  try {
+    const spawned = [];
+    let unrefCalled = false;
+    const mockSpawnSuccess = (cmd, args, opts) => {
+      spawned.push({ cmd, args, opts });
+      const child = new EventEmitter();
+      child.unref = () => {
+        unrefCalled = true;
+      };
+      // Emits spawn event without waiting for process exit
+      process.nextTick(() => child.emit("spawn"));
+      return child;
+    };
+
+    const res = await openShortcut(dir, "terminal", {
+      platform: "linux",
+      env: { TERMINAL: "kitty" },
+      spawn: mockSpawnSuccess,
+    });
+    assert.deepEqual(res, { status: "opened" });
+    assert.equal(unrefCalled, true);
+    assert.equal(spawned.length, 1);
+    assert.equal(spawned[0].cmd, "kitty");
+    assert.deepEqual(spawned[0].args, []);
+    assert.equal(spawned[0].opts.cwd, dir);
+    assert.equal(spawned[0].opts.detached, true);
+
+    const mockSpawnFail = (cmd, args, opts) => {
+      const child = new EventEmitter();
+      child.unref = () => {};
+      process.nextTick(() =>
+        child.emit("error", new Error("spawn nonexistent-cmd ENOENT")),
+      );
+      return child;
+    };
+    const failRes = await openShortcut(dir, "terminal", {
+      platform: "linux",
+      env: { TERMINAL: "nonexistent-cmd" },
+      spawn: mockSpawnFail,
+    });
+    assert.equal(failRes.status, "failed");
+    assert.ok(failRes.error.includes("ENOENT"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("openShortcut supports legacy exec option for backward compatibility", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "open-test-"));
   try {
     const executed = [];
-    const mockExecSuccess = (cmd, args, opts, cb) => {
+    const mockExec = (cmd, args, opts, cb) => {
       executed.push({ cmd, args, opts });
       cb(null);
     };
 
     const res = await openShortcut(dir, "terminal", {
       platform: "darwin",
-      exec: mockExecSuccess,
+      exec: mockExec,
     });
     assert.deepEqual(res, { status: "opened" });
     assert.equal(executed.length, 1);
     assert.equal(executed[0].cmd, "/usr/bin/open");
     assert.deepEqual(executed[0].args, ["-a", "Terminal", dir]);
-
-    const mockExecFail = (cmd, args, opts, cb) => {
-      cb(new Error("Command failed with code 1"));
-    };
-    const failRes = await openShortcut(dir, "fileManager", {
-      platform: "linux",
-      exec: mockExecFail,
-    });
-    assert.equal(failRes.status, "failed");
-    assert.ok(failRes.error.includes("Command failed with code 1"));
+    assert.equal(executed[0].opts.cwd, dir);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
