@@ -1,7 +1,7 @@
 import { sourceState } from "./source-state.mjs";
 import { acquireOperation } from "./lock.mjs";
 import { randomUUID } from "node:crypto";
-import { readFile, mkdir, rm, lstat } from "node:fs/promises";
+import { readFile, mkdir, rm, lstat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   safeFile,
@@ -21,6 +21,7 @@ import {
   patchText,
   validateSettings,
 } from "./profile.mjs";
+import { unpackBundle } from "./bundle.mjs";
 
 function skipMissingDisabled(ctx, current, target) {
   return (
@@ -116,15 +117,55 @@ async function installedFile(ctx, row, name) {
   if (!path.isAbsolute(row.path))
     throw new Error("Installed plugin path must be absolute");
   const relative = path.relative(ctx.home, row.path);
+  const segments = relative.split(path.sep);
   if (
     relative.startsWith("..") ||
     path.isAbsolute(relative) ||
-    !relative.split(path.sep).includes("plugins")
+    (!segments.includes("plugins") && !segments.includes("local-plugins"))
   )
     throw new Error(
       `Plugin path is outside local managed installations: ${row.id}`,
     );
-  return safeFile(ctx.home, `${relative.split(path.sep).join("/")}/${name}`);
+  return safeFile(ctx.home, `${segments.join("/")}/${name}`);
+}
+async function installOrUpdateBundlePlugin(
+  ctx,
+  target,
+  isUpdate = false,
+  existingPath = null,
+) {
+  const bundleRel = target.source.slice(7);
+  const bundlePath = await safeFile(ctx.root, bundleRel);
+  const raw = await readFile(bundlePath);
+  if (digest(raw) !== target.revision) {
+    throw new Error(
+      `Bundle hash mismatch for ${target.id}: expected ${target.revision}, got ${digest(raw)}`,
+    );
+  }
+  const destDir = existingPath || path.join(ctx.home, "local-plugins", target.id);
+  await rm(destDir, { recursive: true, force: true });
+  await unpackBundle(raw, destDir);
+  await writeFile(
+    path.join(destDir, ".paseo-sync-bundle.json"),
+    JSON.stringify(
+      { source: target.source, revision: target.revision },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  if (!isUpdate) {
+    await ctx.adapter.install({ ...target, source: destDir });
+  } else {
+    if (typeof ctx.adapter.reload === "function") {
+      await ctx.adapter.reload(target.id);
+    } else if (typeof ctx.adapter.act === "function") {
+      try {
+        await ctx.adapter.act("reload", target.id);
+      } catch {}
+    }
+  }
+  return destDir;
 }
 async function capture(ctx, profile) {
   const rows = await ctx.adapter.list();
@@ -667,7 +708,11 @@ export async function applyPlan(ctx, approval) {
           throw new Error(`Settings changed concurrently while stopping ${id}`);
       }
       if (change.actions.includes("install")) {
-        await ctx.adapter.install(target);
+        if (target.source.startsWith("bundle:")) {
+          await installOrUpdateBundlePlugin(ctx, target, false);
+        } else {
+          await ctx.adapter.install(target);
+        }
         const row = (await ctx.adapter.list()).find((x) => x.id === id);
         if (!row) throw new Error(`Install returned no plugin: ${id}`);
         if (row.enabled) await ctx.adapter.act("disable", id);
@@ -679,7 +724,11 @@ export async function applyPlan(ctx, approval) {
           !same(await sourceState(latest, profile), before.sourceState ?? null)
         )
           throw new Error(`Local source changed while stopping ${id}`);
-        await ctx.adapter.update(target);
+        if (target.source.startsWith("bundle:")) {
+          await installOrUpdateBundlePlugin(ctx, target, true, latest.path);
+        } else {
+          await ctx.adapter.update(target);
+        }
       }
       const row = (await ctx.adapter.list()).find((x) => x.id === id);
       if (!row) throw new Error(`Missing plugin after install: ${id}`);
@@ -968,8 +1017,17 @@ export async function restore(ctx, id, approval) {
           pluginIdentity(before.descriptor),
         )
       ) {
-        if (row) await ctx.adapter.update(before.descriptor);
-        else await ctx.adapter.install(before.descriptor);
+        if (before.descriptor.source.startsWith("bundle:")) {
+          await installOrUpdateBundlePlugin(
+            ctx,
+            before.descriptor,
+            !!row,
+            row?.path,
+          );
+        } else {
+          if (row) await ctx.adapter.update(before.descriptor);
+          else await ctx.adapter.install(before.descriptor);
+        }
         row = (await ctx.adapter.list()).find((x) => x.id === target.id);
         if (row?.enabled) await ctx.adapter.act("disable", target.id);
         await assertCurrentSettings(target.id);

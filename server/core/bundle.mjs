@@ -12,6 +12,7 @@ const EXCLUDED_PATTERNS = [
   /(^|\/)Thumbs\.db$/,
   /(^|\/)\.cache($|\/)/,
   /\.log$/,
+  /(^|\/)\.paseo-sync-bundle\.json$/,
 ];
 
 export function shouldExclude(relPath) {

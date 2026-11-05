@@ -1,4 +1,6 @@
 import { readFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { safeFile, relativeName, objectHash, digest } from "./files.mjs";
 
 const ID = /^[a-z][a-z0-9_-]*$/;
@@ -282,6 +284,23 @@ export function isPortablePlugin(row) {
 }
 export function snapshotPlugin(row) {
   const i = row.installation;
+  if (i?.identity?.kind === "directory" && row.path) {
+    const metaFile = path.join(row.path, ".paseo-sync-bundle.json");
+    if (existsSync(metaFile)) {
+      try {
+        const meta = JSON.parse(readFileSync(metaFile, "utf8"));
+        if (meta.source && meta.source.startsWith("bundle:") && meta.revision) {
+          const p = {
+            id: row.id,
+            source: meta.source,
+            revision: meta.revision,
+            enabled: row.enabled,
+          };
+          return validatePlugin(p);
+        }
+      } catch {}
+    }
+  }
   check(
     i?.identity && i.currentRevision,
     `Cannot export untracked plugin: ${row.id}`,
@@ -292,7 +311,9 @@ export function snapshotPlugin(row) {
     source:
       identity.kind === "npm"
         ? `npm:${identity.packageName}`
-        : `git:${identity.remote}`,
+        : identity.kind === "bundle"
+          ? identity.source
+          : `git:${identity.remote}`,
     revision: i.currentRevision,
     enabled: row.enabled,
   };

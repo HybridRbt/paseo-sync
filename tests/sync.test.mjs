@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { digest, writeJson } from "../server/core/files.mjs";
+import { packPluginDirectory } from "../server/core/bundle.mjs";
 import { loadProfile } from "../server/core/profile.mjs";
 import {
   buildPlan,
@@ -73,23 +74,33 @@ async function fixture(t, { installed = false, patch = false } = {}) {
     if (rows.some((x) => x.id === p.id))
       throw new Error("Plugin ID already configured");
     calls.push(["install", p.id, p.revision]);
-    const dir = path.join(home, "plugins", p.id, p.revision);
-    await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, "index.client.tsx"), 'icon="Github"');
+    const isDir = path.isAbsolute(p.source);
+    const dir = isDir ? p.source : path.join(home, "plugins", p.id, p.revision);
+    if (!isDir) {
+      await mkdir(dir, { recursive: true });
+      await writeFile(path.join(dir, "index.client.tsx"), 'icon="Github"');
+    }
     rows = rows.filter((x) => x.id !== p.id);
     rows.push({
       id: p.id,
       path: dir,
       enabled: true,
       status: "running",
-      installation: {
-        identity: {
-          kind: "npm",
-          packageName: p.source.slice(4),
-          pluginPath: ".",
-        },
-        currentRevision: p.revision,
-      },
+      installation: isDir
+        ? {
+            identity: {
+              kind: "directory",
+              path: dir,
+            },
+          }
+        : {
+            identity: {
+              kind: "npm",
+              packageName: p.source.slice(4),
+              pluginPath: ".",
+            },
+            currentRevision: p.revision,
+          },
     });
   }
   const adapter = {
@@ -1576,4 +1587,84 @@ test("restore never rolls back external settings changes for a plugin skipped by
   const restored = await restore(f.ctx, r.backupId, undo.approval);
   assert.deepEqual(restored.retainedDisabledPlugins, ["firstmate"]);
   assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), external);
+});
+
+test("applies and updates offline bundle plugins idempotently", async (t) => {
+  const f = await fixture(t);
+  const bundleSourceDir = path.join(f.home, "tool-source");
+  await mkdir(bundleSourceDir, { recursive: true });
+  await writeFile(
+    path.join(bundleSourceDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "my-tool", name: "My Tool" }),
+  );
+  await writeFile(
+    path.join(bundleSourceDir, "index.js"),
+    "console.log('version 1');",
+  );
+  const packedV1 = await packPluginDirectory(bundleSourceDir);
+  const bundleFile = path.join(f.root, "bundles/my-tool.tar.gz");
+  await mkdir(path.dirname(bundleFile), { recursive: true });
+  await writeFile(bundleFile, packedV1.buffer);
+
+  f.manifest.plugins.push({
+    id: "my-tool",
+    source: "bundle:bundles/my-tool.tar.gz",
+    revision: packedV1.sha256,
+    enabled: true,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  // 1. Build plan should identify install action
+  const plan1 = await buildPlan(f.ctx);
+  const toolChange = plan1.changes.find((c) => c.plugin === "my-tool");
+  assert.ok(toolChange, "Plan should have change for my-tool");
+  assert.deepEqual(toolChange.actions, ["install"]);
+
+  // 2. Apply plan
+  const result1 = await applyPlan(f.ctx, plan1.approval);
+  assert.equal(result1.changed, true);
+
+  // Verify unpacked files
+  const installedDir = path.join(f.home, "local-plugins/my-tool");
+  assert.equal(
+    await readFile(path.join(installedDir, "index.js"), "utf8"),
+    "console.log('version 1');",
+  );
+  const meta1 = JSON.parse(
+    await readFile(path.join(installedDir, ".paseo-sync-bundle.json"), "utf8"),
+  );
+  assert.equal(meta1.source, "bundle:bundles/my-tool.tar.gz");
+  assert.equal(meta1.revision, packedV1.sha256);
+
+  // 3. Second plan should be idempotent
+  const plan2 = await buildPlan(f.ctx);
+  assert.equal(plan2.changes.length, 0);
+
+  // 4. Update bundle to version 2
+  await writeFile(
+    path.join(bundleSourceDir, "index.js"),
+    "console.log('version 2');",
+  );
+  const packedV2 = await packPluginDirectory(bundleSourceDir);
+  await writeFile(bundleFile, packedV2.buffer);
+
+  const manifestTarget = f.manifest.plugins.find((p) => p.id === "my-tool");
+  manifestTarget.revision = packedV2.sha256;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  const plan3 = await buildPlan(f.ctx);
+  const updateChange = plan3.changes.find((c) => c.plugin === "my-tool");
+  assert.ok(updateChange, "Plan should have change for my-tool update");
+  assert.deepEqual(updateChange.actions, ["update"]);
+
+  const result2 = await applyPlan(f.ctx, plan3.approval);
+  assert.equal(result2.changed, true);
+  assert.equal(
+    await readFile(path.join(installedDir, "index.js"), "utf8"),
+    "console.log('version 2');",
+  );
+  const meta2 = JSON.parse(
+    await readFile(path.join(installedDir, ".paseo-sync-bundle.json"), "utf8"),
+  );
+  assert.equal(meta2.revision, packedV2.sha256);
 });
