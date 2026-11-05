@@ -130,16 +130,21 @@ export async function discoverRepositories({
   maxDirectories = 1500,
   maxDepth = 6,
   maxMs = 3000,
+  now = Date.now,
 } = {}) {
   const candidates = [],
     seen = new Set(),
-    deadline = Date.now() + maxMs;
+    deadline =
+      maxMs !== null && maxMs !== undefined && Number.isFinite(maxMs)
+        ? now() + maxMs
+        : null;
   let limited = false,
     savedInvalid = false,
     scanned = 0;
   let timedOut = false;
   const io = async (fn) => {
-    const remaining = deadline - Date.now();
+    if (deadline === null) return fn();
+    const remaining = deadline - now();
     if (remaining <= 0) {
       limited = timedOut = true;
       throw new Error("Discovery time budget exhausted");
@@ -185,7 +190,11 @@ export async function discoverRepositories({
   for (const p of history) if (typeof p === "string") await add(p, "history");
   const queue = roots.map((root) => ({ root, depth: 0 }));
   while (queue.length) {
-    if (scanned >= maxDirectories || Date.now() >= deadline || timedOut) {
+    if (
+      scanned >= maxDirectories ||
+      (deadline !== null && now() >= deadline) ||
+      timedOut
+    ) {
       limited = true;
       break;
     }

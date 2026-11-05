@@ -311,6 +311,8 @@ export function createService({
         daemonHome: home,
         historyFile,
         ...(discoveryRoots ? { roots: discoveryRoots } : {}),
+        ...(input.maxMs !== undefined ? { maxMs: input.maxMs } : {}),
+        ...(input.now ? { now: input.now } : {}),
       });
     },
     async start(input) {
