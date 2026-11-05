@@ -87,6 +87,46 @@ test("export keeps previously published entry for an untracked plugin", async ()
   assert.equal(manifest.plugins.length, 1);
   assert.equal(manifest.plugins[0].id, "better-paseo");
 });
+test("export packages a valid directory plugin into a bundle archive instead of skipping", async () => {
+  const ctx = await fixture();
+  const pluginDir = path.join(ctx.home, "flowly-checkout");
+  await mkdir(pluginDir, { recursive: true });
+  await writeFile(
+    path.join(pluginDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "flowly", name: "Flowly" }),
+  );
+  await writeFile(path.join(pluginDir, "index.js"), "console.log('flowly');");
+
+  ctx.rows.push({
+    id: "flowly",
+    enabled: true,
+    status: "running",
+    path: pluginDir,
+    installation: {
+      identity: {
+        kind: "directory",
+        path: pluginDir,
+      },
+    },
+  });
+
+  const result = await exportProfile(ctx);
+  assert.ok(!result.skipped.some((s) => s.plugin === "flowly"));
+  const manifest = JSON.parse(
+    await readFile(path.join(ctx.root, "profile.json"), "utf8"),
+  );
+  const flowlyEntry = manifest.plugins.find((p) => p.id === "flowly");
+  assert.ok(flowlyEntry);
+  assert.equal(flowlyEntry.source, "bundle:bundles/flowly.tar.gz");
+  assert.equal(flowlyEntry.revision.length, 64);
+
+  const bundleRaw = await readFile(path.join(ctx.root, "bundles/flowly.tar.gz"));
+  const crypto = await import("node:crypto");
+  assert.equal(
+    crypto.createHash("sha256").update(bundleRaw).digest("hex"),
+    flowlyEntry.revision,
+  );
+});
 test("repository guard refuses tracked work and commits behind upstream", async () => {
   const ctx = await fixture();
   const git = (...args) =>

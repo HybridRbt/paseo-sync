@@ -6,9 +6,11 @@ import {
   jsonOrNull,
   bytesOrNull,
   writeJson,
+  atomicWrite,
   same,
   digest,
 } from "./files.mjs";
+import { packPluginDirectory } from "./bundle.mjs";
 import {
   isPortablePlugin,
   snapshotPlugin,
@@ -86,8 +88,35 @@ export async function exportProfile(ctx) {
   // published entry stays as the repository has it, and an unpublished one is
   // left out of this export.
   const skipped = [];
+  const bundled = new Map();
   for (const row of rows) {
     if (!isPortablePlugin(row)) {
+      if (row.installation?.identity?.kind === "directory" && row.path) {
+        try {
+          const manifest = await jsonOrNull(
+            await safeFile(row.path, "paseo-plugin.json"),
+          );
+          if (!manifest) throw new Error("Missing paseo-plugin.json");
+          const packed = await packPluginDirectory(row.path);
+          bundled.set(row.id, {
+            descriptor: {
+              id: row.id,
+              source: `bundle:bundles/${row.id}.tar.gz`,
+              revision: packed.sha256,
+              enabled: row.enabled,
+            },
+            buffer: packed.buffer,
+            relPath: `bundles/${row.id}.tar.gz`,
+          });
+          continue;
+        } catch {
+          skipped.push({
+            plugin: row.id,
+            reason: "untracked",
+          });
+          continue;
+        }
+      }
       skipped.push({
         plugin: row.id,
         reason: "untracked",
@@ -126,7 +155,10 @@ export async function exportProfile(ctx) {
   }
   const carriedIds = new Set(carried.map((p) => p.id));
   const plugins = [
-    ...rows.filter((r) => !skippedIds.has(r.id)).map(snapshotPlugin),
+    ...rows
+      .filter((r) => !skippedIds.has(r.id) && !bundled.has(r.id))
+      .map(snapshotPlugin),
+    ...[...bundled.values()].map((b) => b.descriptor),
     ...carried,
     ...retained,
   ].sort((a, b) => a.id.localeCompare(b.id));
@@ -232,6 +264,8 @@ export async function exportProfile(ctx) {
     patches,
   });
   // Every input is validated before the first repository write.
+  for (const b of bundled.values())
+    await atomicWrite(await safeFile(ctx.root, b.relPath), b.buffer);
   for (const s of settings)
     await writeJson(await safeFile(ctx.root, s.file), s.data);
   await writeJson(await safeFile(ctx.root, "profile.json"), manifest);

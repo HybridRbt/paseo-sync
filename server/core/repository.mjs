@@ -128,6 +128,7 @@ async function exportSnapshot(ctx) {
         "profile.json",
         ...loaded.manifest.settings.map((x) => x.file),
         ...loaded.manifest.patches.map((x) => x.file),
+        ...(loaded.bundles?.map((x) => x.file) ?? []),
       ])
         await atomicWrite(
           await safeFile(temp, file),
@@ -141,16 +142,25 @@ async function exportSnapshot(ctx) {
       "profile.json",
       ...loaded.manifest.settings.map((x) => x.file),
       ...loaded.manifest.patches.map((x) => x.file),
+      ...(loaded.bundles?.map((x) => x.file) ?? []),
     ].sort()) {
       relativeName(file);
       const before = await bytesOrNull(await safeFile(ctx.root, file)),
         after = await bytesOrNull(await safeFile(temp, file));
-      if (!before?.equals(after))
+      if (!before?.equals(after)) {
+        const isBinary = file.endsWith(".tar.gz") || file.endsWith(".tgz");
         files.push({
           path: file,
-          before: before?.toString("utf8") ?? null,
-          after: after.toString("utf8"),
+          binary: isBinary || undefined,
+          before: isBinary
+            ? before
+              ? before.toString("base64")
+              : null
+            : before?.toString("utf8") ?? null,
+          after: isBinary ? after.toString("base64") : after.toString("utf8"),
+          _bytes: after,
         });
+      }
     }
     return {
       head,
@@ -191,8 +201,12 @@ export async function publish(ctx, approval, { push = true } = {}) {
     if (push && !p.origin)
       throw new Error("Publishing requires an origin remote");
     if (p.files.length) {
-      for (const file of p.files)
-        await atomicWrite(await safeFile(ctx.root, file.path), file.after);
+      for (const file of p.files) {
+        const payload =
+          file._bytes ??
+          (file.binary ? Buffer.from(file.after, "base64") : file.after);
+        await atomicWrite(await safeFile(ctx.root, file.path), payload);
+      }
       const names = p.files.map((x) => x.path);
       await git(ctx.root, "add", "--", ...names);
       await git(
