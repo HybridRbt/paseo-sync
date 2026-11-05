@@ -26,10 +26,14 @@ const english = {
     "Plugin {plugin}: local source has uncommitted changes.",
   "插件 {plugin}：本机源码与安装版本不一致。":
     "Plugin {plugin}: local source HEAD differs from the installed revision.",
+  "插件 {plugin}：备份记录了本地源码改动，与当前状态不一致。":
+    "Plugin {plugin}: the backup recorded local source changes differing from the current checkout.",
   "在插件源码仓库提交或撤销改动后，重新预览恢复。":
     "Commit or discard changes in the plugin source repository, then preview the restore again.",
   "运行 paseo plugin update {plugin} 或对齐提交后，重新预览恢复。":
     "Run paseo plugin update {plugin} or align HEAD, then preview the restore again.",
+  "在插件源码仓库对齐备份改动，或重新执行操作建立新备份后，重新预览恢复。":
+    "Align the plugin source with the recorded changes or create a fresh backup, then preview the restore again.",
   "插件状态在备份后发生变化：{plugins}":
     "Plugin configuration changed after the backup: {plugins}",
   "设置在备份后发生变化：{settings}":
@@ -287,13 +291,20 @@ export function renderDriftDisclosure(drift, t) {
   }
   const lines = [t("备份生成后本机数据已发生变化，需先处理变更后方可恢复：")];
   for (const s of drift.source ?? []) {
+    let descKey;
+    let guideKey;
+    if (s.reason === "head-differs") {
+      descKey = "插件 {plugin}：本机源码与安装版本不一致。";
+      guideKey = "运行 paseo plugin update {plugin} 或对齐提交后，重新预览恢复。";
+    } else if (s.reason === "recorded-source-dirty") {
+      descKey = "插件 {plugin}：备份记录了本地源码改动，与当前状态不一致。";
+      guideKey = "在插件源码仓库对齐备份改动，或重新执行操作建立新备份后，重新预览恢复。";
+    } else {
+      descKey = "插件 {plugin}：本地源码有未提交改动。";
+      guideKey = "在插件源码仓库提交或撤销改动后，重新预览恢复。";
+    }
     lines.push(
-      t(
-        s.reason === "head-differs"
-          ? "插件 {plugin}：本机源码与安装版本不一致。"
-          : "插件 {plugin}：本地源码有未提交改动。",
-        { plugin: s.plugin },
-      ) +
+      t(descKey, { plugin: s.plugin }) +
         (s.files?.length
           ? " " + t("改动文件：{files}", { files: s.files.join(", ") })
           : ""),
@@ -301,14 +312,7 @@ export function renderDriftDisclosure(drift, t) {
     if (s.checkout) {
       lines.push(t("本机源码目录：{checkout}", { checkout: s.checkout }));
     }
-    lines.push(
-      t(
-        s.reason === "head-differs"
-          ? "运行 paseo plugin update {plugin} 或对齐提交后，重新预览恢复。"
-          : "在插件源码仓库提交或撤销改动后，重新预览恢复。",
-        { plugin: s.plugin },
-      ),
-    );
+    lines.push(t(guideKey, { plugin: s.plugin }));
   }
   if (drift.plugins?.length) {
     lines.push(

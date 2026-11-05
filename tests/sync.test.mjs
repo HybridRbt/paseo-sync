@@ -1083,6 +1083,99 @@ test("a changed global pluginsEnabled switch after backup discloses drift and di
     /pluginsEnabled: true -> false/,
   );
 });
+test("a Git plugin with recorded uncommitted changes in backup discloses drift when current checkout is clean", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process");
+  const row = (await f.adapter.list())[0];
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", row.path, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = sha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha,
+    };
+    return rows;
+  };
+
+  const p = await buildPlan(f.ctx);
+  const r = await applyPlan(f.ctx, p.approval);
+
+  // Simulate backup.after having recorded uncommitted changes (e.g. from a failed operation)
+  const file = path.join(f.state, "backups", r.backupId + ".json");
+  const b = JSON.parse(await readFile(file, "utf8"));
+  b.after.plugins[row.id].sourceState = {
+    clean: false,
+    head: sha,
+    statusHash: "dirty123",
+    changed: ["index.client.tsx"],
+  };
+  await writeJson(file, b);
+
+  // Current checkout is clean and matches installed revision
+  const preview = await restorePlan(f.ctx, r.backupId);
+  assert.ok(preview.currentChangedSinceBackup);
+  assert.deepEqual(preview.currentChangedSinceBackup.source, [
+    {
+      plugin: "better-paseo",
+      reason: "recorded-source-dirty",
+      files: ["index.client.tsx"],
+      head: sha,
+      checkout: row.path,
+    },
+  ]);
+
+  const { translator, canConfirmPreview, renderDriftDisclosure } =
+    await import("../client/i18n.mjs");
+  assert.equal(canConfirmPreview({ ...preview, confirmKind: "restore" }), false);
+
+  for (const language of ["zh", "en"]) {
+    const tLang = translator(language);
+    const lines = renderDriftDisclosure(preview.currentChangedSinceBackup, tLang);
+    const rendered = lines.join("\n");
+    assert.ok(
+      rendered.includes("better-paseo"),
+      `${language}: missing plugin name`,
+    );
+    assert.ok(
+      rendered.includes("index.client.tsx"),
+      `${language}: missing changed file`,
+    );
+    if (language === "en") {
+      assert.ok(
+        rendered.includes(
+          "the backup recorded local source changes differing from the current checkout",
+        ),
+        "en: missing description",
+      );
+    } else {
+      assert.ok(
+        rendered.includes("备份记录了本地源码改动，与当前状态不一致"),
+        "zh: missing description",
+      );
+    }
+  }
+
+  await assert.rejects(
+    restore(f.ctx, r.backupId, preview.approval),
+    /source: better-paseo/,
+  );
+});
 test("legacy schema v1 backups without Git source metadata remain restorable when source is clean", async (t) => {
   const f = await fixture(t, { installed: true }),
     { execFileSync } = await import("node:child_process"),

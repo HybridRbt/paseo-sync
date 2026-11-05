@@ -187,9 +187,13 @@ function backupDrift(afterState, currentState, includeSource = true) {
     const cp = c.plugins[id];
     if (same(ap, cp)) continue;
 
+    const apDesc = ap ? { descriptor: ap.descriptor, status: ap.status } : null;
+    const cpDesc = cp ? { descriptor: cp.descriptor, status: cp.status } : null;
+
     if (includeSource && !same(ap?.sourceState, cp?.sourceState)) {
       const curPlugin = currentState.plugins[id];
       const curSource = cp?.sourceState;
+      const prevSource = ap?.sourceState;
       const isDirty = curSource?.clean === false;
       const headMismatch =
         Boolean(curSource?.head && curPlugin?.descriptor?.revision) &&
@@ -205,11 +209,25 @@ function backupDrift(afterState, currentState, includeSource = true) {
           head: curSource?.head ?? null,
           checkout: curPlugin?.path ?? null,
         });
+      } else if (prevSource?.clean === false) {
+        source.push({
+          plugin: id,
+          reason: "recorded-source-dirty",
+          files: prevSource?.changed ?? [],
+          head: curSource?.head ?? prevSource?.head ?? null,
+          checkout: curPlugin?.path ?? null,
+        });
+      } else if (same(apDesc, cpDesc) && prevSource?.head !== curSource?.head) {
+        source.push({
+          plugin: id,
+          reason: "head-differs",
+          files: [],
+          head: curSource?.head ?? null,
+          checkout: curPlugin?.path ?? null,
+        });
       }
     }
 
-    const apDesc = ap ? { descriptor: ap.descriptor, status: ap.status } : null;
-    const cpDesc = cp ? { descriptor: cp.descriptor, status: cp.status } : null;
     if (!same(apDesc, cpDesc)) {
       plugins.push({
         plugin: id,
