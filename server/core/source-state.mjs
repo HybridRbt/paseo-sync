@@ -30,17 +30,38 @@ async function isInstallGenerated(top, name, scope) {
   }
 }
 
-async function installBuildScope(row) {
+async function installBuildScope(row, top) {
+  let files;
   try {
     const manifest = await jsonOrNull(
       await safeFile(row.path, "paseo-plugin.json"),
     );
-    const files = manifest?.installBuildFiles;
-    if (!Array.isArray(files)) return null;
-    return new Set(files.filter((f) => typeof f === "string"));
+    files = manifest?.installBuildFiles;
   } catch {
     return null;
   }
+  if (!Array.isArray(files)) return null;
+  // Manifest paths are plugin-relative; git status reports names relative
+  // to the toplevel, so a plugin in a repository subdirectory must be
+  // normalized the same way as the patch allowance below. safeFile resolves
+  // the row root through realpath so macOS /var checkouts match the
+  // toplevel git reports (/private/var). Unsafe entries never match a
+  // status name and are dropped.
+  const names = [];
+  for (const f of files) {
+    if (typeof f !== "string") continue;
+    try {
+      names.push(
+        path
+          .relative(top, await safeFile(row.path, f))
+          .split(path.sep)
+          .join("/"),
+      );
+    } catch {
+      // skip entries with unsafe relative paths
+    }
+  }
+  return new Set(names);
 }
 
 export async function sourceState(row, profile) {
@@ -65,7 +86,7 @@ export async function sourceState(row, profile) {
       if (raw !== null && digest(raw) === f.afterSha256)
         allowed.set(name, true);
     }
-  const scope = await installBuildScope(row);
+  const scope = await installBuildScope(row, top);
   const changed = [];
   const parts = status.split("\0");
   for (let i = 0; i < parts.length; i++) {
