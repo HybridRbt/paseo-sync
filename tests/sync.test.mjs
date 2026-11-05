@@ -1038,6 +1038,51 @@ test("a clean Git revision update after backup is disclosed as plugin drift rath
     assert.ok(!rendered.includes("本机源码与安装版本不一致"));
   }
 });
+test("a changed global pluginsEnabled switch after backup discloses drift and disables confirm", async (t) => {
+  const f = await fixture(t, { installed: true });
+  const p = await buildPlan(f.ctx);
+  const r = await applyPlan(f.ctx, p.approval);
+
+  // Toggle global plugin switch in config.json after the backup
+  await writeJson(path.join(f.home, "config.json"), { pluginsEnabled: false });
+
+  const preview = await restorePlan(f.ctx, r.backupId);
+  assert.ok(preview.currentChangedSinceBackup);
+  assert.deepEqual(preview.currentChangedSinceBackup.pluginsEnabled, {
+    from: true,
+    to: false,
+  });
+
+  const { translator, canConfirmPreview, renderDriftDisclosure } =
+    await import("../client/i18n.mjs");
+  assert.equal(canConfirmPreview({ ...preview, confirmKind: "restore" }), false);
+
+  for (const language of ["zh", "en"]) {
+    const tLang = translator(language);
+    const lines = renderDriftDisclosure(preview.currentChangedSinceBackup, tLang);
+    const rendered = lines.join("\n");
+    assert.ok(
+      rendered.includes("true -> false"),
+      `${language}: missing switch values`,
+    );
+    if (language === "en") {
+      assert.ok(
+        rendered.includes("Global plugin switch changed after the backup:"),
+        "en: missing label",
+      );
+    } else {
+      assert.ok(
+        rendered.includes("全局插件开关在备份后发生变化："),
+        "zh: missing label",
+      );
+    }
+  }
+
+  await assert.rejects(
+    restore(f.ctx, r.backupId, preview.approval),
+    /pluginsEnabled: true -> false/,
+  );
+});
 test("legacy schema v1 backups without Git source metadata remain restorable when source is clean", async (t) => {
   const f = await fixture(t, { installed: true }),
     { execFileSync } = await import("node:child_process"),

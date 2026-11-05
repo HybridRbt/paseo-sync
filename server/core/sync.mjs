@@ -776,6 +776,10 @@ export async function restore(ctx, id, approval) {
           details.push(`settings: ${d.settings.join(", ")}`);
         if (d.patches?.length)
           details.push(`patches: ${d.patches.join(", ")}`);
+        if (d.pluginsEnabled)
+          details.push(
+            `pluginsEnabled: ${d.pluginsEnabled.from} -> ${d.pluginsEnabled.to}`,
+          );
       }
       throw new Error(
         `Current managed data changed after the operation; resolve those changes before restoring.${details.length ? ` (${details.join(", ")})` : ""}`,

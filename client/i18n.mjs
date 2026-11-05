@@ -36,6 +36,8 @@ const english = {
     "Settings changed after the backup: {settings}",
   "补丁在备份后发生变化：{patches}":
     "Patches changed after the backup: {patches}",
+  "全局插件开关在备份后发生变化：{from} -> {to}":
+    "Global plugin switch changed after the backup: {from} -> {to}",
   "改动文件：{files}": "Changed files: {files}",
   "配置仓库沿用该插件已发布的版本。":
     "The configuration repository keeps this plugin's previously published version.",
@@ -326,6 +328,14 @@ export function renderDriftDisclosure(drift, t) {
     lines.push(
       t("补丁在备份后发生变化：{patches}", {
         patches: drift.patches.join(", "),
+      }),
+    );
+  }
+  if (drift.pluginsEnabled) {
+    lines.push(
+      t("全局插件开关在备份后发生变化：{from} -> {to}", {
+        from: String(drift.pluginsEnabled.from),
+        to: String(drift.pluginsEnabled.to),
       }),
     );
   }
