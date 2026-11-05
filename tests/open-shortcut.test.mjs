@@ -253,6 +253,9 @@ test("bilingual translations cover all checkout shortcut labels and feedback", a
       "跳过 my-plugin：本地开发或未受管插件，本次不发布它的变更。",
       { plugin: "my-plugin" },
     ],
+    ["离线归档", "Offline bundle", "离线归档"],
+    ["新增离线归档包", "Add offline bundle archive", "新增离线归档包"],
+    ["更新离线归档包", "Update offline bundle archive", "更新离线归档包"],
   ];
 
   for (const [key, expectedEn, expectedZh, params] of keys) {
