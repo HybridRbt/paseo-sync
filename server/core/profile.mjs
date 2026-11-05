@@ -42,10 +42,19 @@ export function validatePlugin(p) {
       SEMVER.test(p.revision),
       "npm revision must be an exact semantic version",
     );
+  } else if (p.source.startsWith("bundle:")) {
+    check(
+      p.source === `bundle:bundles/${p.id}.tar.gz`,
+      "Bundle source must be bundle:bundles/<id>.tar.gz",
+    );
+    check(
+      SHA.test(p.revision),
+      "Bundle revision must be a complete 64-character SHA256",
+    );
   } else {
     check(
       p.source.startsWith("git:"),
-      "Only portable npm: and git: sources are supported",
+      "Only portable npm:, git: and bundle: sources are supported",
     );
     const u = new URL(p.source.slice(4));
     check(
@@ -326,10 +335,24 @@ export async function loadProfile(root) {
       ),
     });
   }
+  const bundles = [];
+  for (const plugin of manifest.plugins) {
+    if (plugin.source.startsWith("bundle:")) {
+      const bundleRel = plugin.source.slice(7);
+      const bundlePath = await safeFile(root, bundleRel);
+      const raw = await readFile(bundlePath);
+      const hash = digest(raw);
+      check(hash === plugin.revision, `Bundle hash mismatch: ${plugin.id}`);
+      bundles.push({ plugin: plugin.id, file: bundleRel, hash });
+    }
+  }
+  const hashPayload = { manifest, settings, patches };
+  if (bundles.length > 0) hashPayload.bundles = bundles;
   return {
     manifest,
     settings,
     patches,
-    hash: objectHash({ manifest, settings, patches }),
+    bundles,
+    hash: objectHash(hashPayload),
   };
 }

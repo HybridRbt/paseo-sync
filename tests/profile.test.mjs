@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, mkdir, symlink } from "node:fs/promises";
+import { mkdtemp, writeFile, mkdir, symlink, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -144,3 +144,54 @@ test("loads only approved documents, rejects malformed setting files", async () 
   );
   await assert.rejects(loadProfile(root));
 });
+
+test("validates bundle plugins and integrity on loadProfile", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "paseo-bundle-"));
+  try {
+    const bundleContent = Buffer.from("fake-gzip-bundle");
+    const crypto = await import("node:crypto");
+    const sha = crypto.createHash("sha256").update(bundleContent).digest("hex");
+
+    const p = {
+      schemaVersion: 1,
+      plugins: [
+        {
+          id: "flowly",
+          source: "bundle:bundles/flowly.tar.gz",
+          revision: sha,
+          enabled: true,
+        },
+      ],
+      settings: [],
+      patches: [],
+    };
+    assert.doesNotThrow(() => validateProfile(p));
+
+    // Rejects invalid bundle formats
+    assert.throws(() => validateProfile({
+      ...p,
+      plugins: [{ id: "flowly", source: "bundle:other/flowly.tar.gz", revision: sha, enabled: true }]
+    }));
+    assert.throws(() => validateProfile({
+      ...p,
+      plugins: [{ id: "flowly", source: "bundle:bundles/flowly.tar.gz", revision: "short", enabled: true }]
+    }));
+
+    // Test loadProfile
+    await mkdir(path.join(root, "bundles"), { recursive: true });
+    await writeFile(path.join(root, "bundles/flowly.tar.gz"), bundleContent);
+    await writeFile(path.join(root, "profile.json"), JSON.stringify(p));
+
+    const loaded = await loadProfile(root);
+    assert.equal(loaded.manifest.plugins[0].id, "flowly");
+    assert.equal(loaded.bundles.length, 1);
+    assert.equal(loaded.bundles[0].hash, sha);
+
+    // Mismatched bundle hash throws
+    await writeFile(path.join(root, "bundles/flowly.tar.gz"), Buffer.from("corrupted-content"));
+    await assert.rejects(() => loadProfile(root), /Bundle hash mismatch/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
