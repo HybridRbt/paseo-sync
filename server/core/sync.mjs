@@ -647,7 +647,8 @@ export async function restorePlan(ctx, id) {
   // dirty (a failed apply, or a restore that skipped the plugin and captured
   // the divergence): the repair guidance tells the user to resolve the
   // checkout and preview again, so neither the dirtiness nor its resolution
-  // may invalidate the backup. Settings and every other plugin stay guarded.
+  // may invalidate the backup. Its patch entries are the same checkout bytes,
+  // so they leave with it. Settings and every other plugin stay guarded.
   const outsideGuard = new Set(
     [current, b.after]
       .filter(Boolean)
@@ -664,6 +665,11 @@ export async function restorePlan(ctx, id) {
       ...c,
       plugins: Object.fromEntries(
         Object.entries(c.plugins).filter(([p]) => !outsideGuard.has(p)),
+      ),
+      patches: Object.fromEntries(
+        Object.entries(c.patches).filter(
+          ([key]) => !outsideGuard.has(key.split("/")[0]),
+        ),
       ),
     };
   };

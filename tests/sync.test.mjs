@@ -964,6 +964,78 @@ test("restore still refuses when unrelated managed data changed after the operat
     /changed after the operation/,
   );
 });
+test("local edits to a managed patch file of a dirty Git plugin do not block the restore", async (t) => {
+  const f = await fixture(t, { installed: true, patch: true }),
+    { execFileSync } = await import("node:child_process"),
+    { realpath } = await import("node:fs/promises");
+  const row = (await f.adapter.list())[0];
+  // sourceState matches patch files by name relative to git's toplevel, so
+  // the reported path must be the canonical one (/private/var on macOS); the
+  // home goes with it so installedFile's containment check still holds.
+  const checkout = await realpath(row.path);
+  f.ctx.home = await realpath(f.ctx.home);
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", checkout, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = sha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const bundle = JSON.parse(
+    await readFile(path.join(f.root, f.manifest.patches[0].file), "utf8"),
+  );
+  bundle.revision = sha;
+  await writeJson(path.join(f.root, f.manifest.patches[0].file), bundle);
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].path = checkout;
+    rows[0].installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha,
+    };
+    return rows;
+  };
+  // The apply installs the managed patch; the patched state itself stays
+  // clean because sourceState treats the patch's after-bytes as allowed.
+  const r = await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  assert.equal(
+    await readFile(path.join(row.path, "index.client.tsx"), "utf8"),
+    'icon="GitPullRequest"',
+  );
+  f.calls.length = 0;
+  // Editing the patch target dirties the checkout; the captured patch bytes
+  // are those same local source files, so the disclosed skip must keep them
+  // out of the snapshot guard instead of blocking the whole restore.
+  await writeFile(path.join(checkout, "index.client.tsx"), 'icon="Two"');
+  const preview = await restorePlan(f.ctx, r.backupId);
+  assert.deepEqual(preview.skipped, [
+    {
+      plugin: "better-paseo",
+      reason: "local-source-changes",
+      files: ["index.client.tsx"],
+      checkout,
+      restore: true,
+    },
+  ]);
+  assert.equal(preview.currentChangedSinceBackup, false);
+  const restored = await restore(f.ctx, r.backupId, preview.approval);
+  assert.equal(restored.restored, true);
+  assert.deepEqual(f.calls, []);
+  assert.equal(
+    await readFile(path.join(checkout, "index.client.tsx"), "utf8"),
+    'icon="Two"',
+  );
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), f.target);
+});
 test("legacy schema v1 backups without Git source metadata remain restorable when source is clean", async (t) => {
   const f = await fixture(t, { installed: true }),
     { execFileSync } = await import("node:child_process"),
