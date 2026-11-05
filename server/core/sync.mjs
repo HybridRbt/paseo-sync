@@ -168,10 +168,8 @@ function comparable(s, includeSource = true) {
     patches: s.patches,
   };
 }
-function backupDrift(afterState, currentState, includeSource = true) {
-  if (!afterState) return null;
-  const a = comparable(afterState, includeSource);
-  const c = comparable(currentState, includeSource);
+function backupDrift(a, c, currentState = null) {
+  if (!a || !c) return null;
   if (same(a, c)) return null;
 
   const plugins = [];
@@ -742,9 +740,40 @@ export async function restorePlan(ctx, id) {
     }
   }
   const skippedIds = new Set(skipped.map((s) => s.plugin));
+  // A dirty local source is outside the snapshot guard whether this preview
+  // discloses it as a skip or the operation's own final snapshot recorded it
+  // dirty (a failed apply, or a restore that skipped the plugin and captured
+  // the divergence): the repair guidance tells the user to resolve the
+  // checkout and preview again, so neither the dirtiness nor its resolution
+  // may invalidate the backup. Its patch entries are the same checkout bytes,
+  // so they leave with it. Settings and every other plugin stay guarded.
+  const outsideGuard = new Set(
+    [current, b.after]
+      .filter(Boolean)
+      .flatMap((s) =>
+        Object.entries(s.plugins)
+          .filter(([, p]) => p?.sourceState?.clean === false)
+          .map(([plugin]) => plugin),
+      ),
+  );
+  const guarded = (s) => {
+    const c = comparable(s, includesSourceMetadata);
+    if (!outsideGuard.size) return c;
+    return {
+      ...c,
+      plugins: Object.fromEntries(
+        Object.entries(c.plugins).filter(([p]) => !outsideGuard.has(p)),
+      ),
+      patches: Object.fromEntries(
+        Object.entries(c.patches).filter(
+          ([key]) => !outsideGuard.has(key.split("/")[0]),
+        ),
+      ),
+    };
+  };
   const drift =
     b.after !== null
-      ? backupDrift(b.after, current, includesSourceMetadata)
+      ? backupDrift(guarded(b.after), guarded(current), current)
       : null;
   return {
     backupId: id,

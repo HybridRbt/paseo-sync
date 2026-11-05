@@ -16,8 +16,8 @@ const english = {
     "Skipped {plugin}: local source has uncommitted changes; the restore leaves this plugin untouched.",
   "跳过 {plugin}：本机源码与安装版本不一致，本次恢复不改动该插件。":
     "Skipped {plugin}: local source HEAD differs from the installed revision; the restore leaves this plugin untouched.",
-  "该插件本次保持本机现状，未被恢复修改。在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览恢复即可恢复备份中的版本。":
-    "The plugin keeps its local state untouched this run. Commit and push in the plugin's source repository, run paseo plugin update {plugin}, then preview the restore again to bring the backed-up version back.",
+  "该插件本次保持本机现状，未被恢复修改。完成本次恢复后，在插件源码仓库提交并推送，运行 paseo plugin update {plugin}，再重新预览恢复即可恢复备份中的版本。":
+    "The plugin keeps its local state untouched this run. After completing this restore, commit and push in the plugin's source repository, run paseo plugin update {plugin}, then preview the restore again to bring the backed-up version back.",
   "备份生成后本机数据已发生变化，需先处理变更后方可恢复：":
     "Current managed data changed after the backup; resolve those changes before restoring:",
   "备份生成后本机数据已发生变化，需先处理变更后方可恢复。":

@@ -905,7 +905,7 @@ export function ResultSummary({
               </Text>
               <Text selectable style={text}>
                 {t(
-                  "该插件本次保持本机现状，未被恢复修改。在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览恢复即可恢复备份中的版本。",
+                  "该插件本次保持本机现状，未被恢复修改。完成本次恢复后，在插件源码仓库提交并推送，运行 paseo plugin update {plugin}，再重新预览恢复即可恢复备份中的版本。",
                   { plugin: s.plugin },
                 )}
               </Text>
