@@ -267,6 +267,46 @@ test("publish preview discloses skipped untracked plugins instead of failing", a
   assert.ok(!manifest.plugins.some((x) => x.id === "flowly"));
   assert.ok(manifest.plugins.some((x) => x.id === "demo"));
 });
+test("publish preview packages a valid directory plugin into a bundle without tripping captureBaseline guard", async () => {
+  const f = await fixture();
+  const dir = path.join(f.home, "flowly-checkout");
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, "paseo-plugin.json"),
+    JSON.stringify({ id: "flowly", name: "Flowly" }),
+  );
+  await writeFile(path.join(dir, "index.js"), "console.log('flowly');");
+
+  f.rows.push({
+    id: "flowly",
+    enabled: true,
+    status: "running",
+    path: dir,
+    installation: {
+      identity: {
+        kind: "directory",
+        path: dir,
+      },
+    },
+  });
+
+  const p = await repository.publishPlan(f);
+  assert.deepEqual(p.skipped, []);
+  assert.ok(p.files.some((x) => x.path === "bundles/flowly.tar.gz"));
+  assert.ok(p.files.some((x) => x.path === "profile.json"));
+
+  await repository.publish(f, p.approval, { push: false });
+  const manifest = JSON.parse(
+    await readFile(path.join(f.root, "profile.json"), "utf8"),
+  );
+  const flowlyEntry = manifest.plugins.find((x) => x.id === "flowly");
+  assert.ok(flowlyEntry);
+  assert.equal(flowlyEntry.source, "bundle:bundles/flowly.tar.gz");
+
+  const baseline = await jsonOrNull(await safeFile(f.state, "baseline.json"));
+  assert.ok(baseline?.plugins?.flowly);
+  assert.equal(baseline.plugins.flowly.revision, flowlyEntry.revision);
+});
 test("a publish approval becomes stale when a skipped plugin recovers, even if files match", async () => {
   const f = await fixture(),
     dir = path.join(f.home, "hot");

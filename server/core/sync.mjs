@@ -21,7 +21,7 @@ import {
   patchText,
   validateSettings,
 } from "./profile.mjs";
-import { unpackBundle } from "./bundle.mjs";
+import { unpackBundle, packPluginDirectory } from "./bundle.mjs";
 
 function skipMissingDisabled(ctx, current, target) {
   return (
@@ -142,7 +142,14 @@ async function installOrUpdateBundlePlugin(
       `Bundle hash mismatch for ${target.id}: expected ${target.revision}, got ${digest(raw)}`,
     );
   }
-  const destDir = existingPath || path.join(ctx.home, "local-plugins", target.id);
+  const isManagedLocal =
+    existingPath &&
+    !path
+      .relative(path.join(ctx.home, "local-plugins"), existingPath)
+      .startsWith("..");
+  const destDir = isManagedLocal
+    ? existingPath
+    : path.join(ctx.home, "local-plugins", target.id);
   await rm(destDir, { recursive: true, force: true });
   await unpackBundle(raw, destDir);
   await writeFile(
@@ -181,6 +188,22 @@ async function capture(ctx, profile) {
       try {
         descriptor = snapshotPlugin(row);
       } catch {}
+      if (
+        !descriptor &&
+        p.source.startsWith("bundle:") &&
+        row.installation?.identity?.kind === "directory" &&
+        row.path
+      ) {
+        try {
+          const packed = await packPluginDirectory(row.path);
+          descriptor = {
+            id: row.id,
+            source: p.source,
+            revision: packed.sha256,
+            enabled: row.enabled,
+          };
+        } catch {}
+      }
     }
     plugins[p.id] = row
       ? {
