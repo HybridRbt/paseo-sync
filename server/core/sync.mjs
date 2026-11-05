@@ -375,7 +375,34 @@ export async function captureBaseline(ctx, profile, skipIds = new Set()) {
       if (raw === null || digest(Buffer.from(raw, "base64")) !== f.afterSha256)
         throw new Error("Local source patch changed while preparing publish");
     }
-  return { schemaVersion: 1, profileHash: profile.hash, ...baseState(current) };
+  const state = baseState(current);
+  if (skipIds.size > 0) {
+    const previous = await baseline(ctx);
+    for (const id of skipIds) {
+      if (previous?.plugins && Object.hasOwn(previous.plugins, id))
+        state.plugins[id] = previous.plugins[id];
+      else delete state.plugins[id];
+      for (const file of Object.keys(state.settings))
+        if (
+          file.startsWith(`settings/${id}/`) ||
+          profile.settings.some((s) => s.plugin === id && s.file === file)
+        )
+          delete state.settings[file];
+      if (previous?.settings)
+        for (const [file, val] of Object.entries(previous.settings))
+          if (
+            file.startsWith(`settings/${id}/`) ||
+            profile.settings.some((s) => s.plugin === id && s.file === file)
+          )
+            state.settings[file] = val;
+      for (const key of Object.keys(state.patches))
+        if (key.startsWith(`${id}/`)) delete state.patches[key];
+      if (previous?.patches)
+        for (const [key, val] of Object.entries(previous.patches))
+          if (key.startsWith(`${id}/`)) state.patches[key] = val;
+    }
+  }
+  return { schemaVersion: 1, profileHash: profile.hash, ...state };
 }
 export async function verify(ctx) {
   const profile = await loadProfile(ctx.root),

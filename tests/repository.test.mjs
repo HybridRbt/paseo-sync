@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import * as repository from "../server/core/repository.mjs";
-import { writeJson } from "../server/core/files.mjs";
+import { jsonOrNull, safeFile, writeJson } from "../server/core/files.mjs";
 async function fixture() {
   const base = await mkdtemp(path.join(tmpdir(), "paseo-repository-"));
   const root = path.join(base, "repo"),
@@ -250,3 +250,62 @@ test("a publish approval becomes stale when a skipped plugin recovers, even if f
     /stale/i,
   );
 });
+test("publishing preserves the previous baseline for skipped plugins so subsequent exports do not report unapplied changes", async () => {
+  const f = await fixture(),
+    dir = path.join(f.home, "hot");
+  await mkdir(dir);
+  const hot = (...a) =>
+    execFileSync("git", ["-c", "core.fsmonitor=false", "-C", dir, ...a], {
+      encoding: "utf8",
+    }).trim();
+  hot("init", "-q");
+  hot("config", "user.name", "Test");
+  hot("config", "user.email", "test@example.invalid");
+  await writeFile(path.join(dir, "code.ts"), "one");
+  hot("add", ".");
+  hot("commit", "-qm", "one");
+  const row = {
+    id: "hot",
+    enabled: true,
+    status: "running",
+    path: dir,
+    installation: {
+      identity: {
+        kind: "git",
+        remote: "https://example.invalid/hot.git",
+        pluginPath: ".",
+      },
+      currentRevision: hot("rev-parse", "HEAD"),
+    },
+  };
+  f.rows.push(row);
+  // Publish revision A
+  let p = await repository.publishPlan(f);
+  await repository.publish(f, p.approval, { push: false });
+  const revA = (
+    await jsonOrNull(await safeFile(f.state, "baseline.json"))
+  ).plugins.hot.revision;
+
+  // Advance locally to revision B
+  await writeFile(path.join(dir, "code.ts"), "two");
+  hot("add", ".");
+  hot("commit", "-qm", "two");
+  row.installation.currentRevision = hot("rev-parse", "HEAD");
+
+  // Dirty local checkout and publish while dirty
+  await writeFile(path.join(dir, "code.ts"), "uncommitted");
+  p = await repository.publishPlan(f);
+  assert.equal(p.skipped[0]?.plugin, "hot");
+  await repository.publish(f, p.approval, { push: false });
+
+  // Baseline must preserve revision A, not unpublished revision B
+  const baseline = await jsonOrNull(await safeFile(f.state, "baseline.json"));
+  assert.equal(baseline.plugins.hot.revision, revA);
+
+  // Reverting uncommitted edit allows clean export/preview without false conflicts
+  hot("checkout", "--", "code.ts");
+  const clean = await repository.publishPlan(f);
+  assert.deepEqual(clean.skipped, []);
+  assert.ok(clean.files.some((x) => x.path === "profile.json"));
+});
+
