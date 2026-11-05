@@ -35,6 +35,7 @@ import {
   rememberRepository,
   syncStateRoot,
 } from "./discovery.mjs";
+import { openShortcut } from "./core/open-shortcut.mjs";
 const mutations = new Set(["apply", "publish", "cafe", "restore"]);
 export function createService({
   readSettings,
@@ -43,6 +44,7 @@ export function createService({
   adapterFactory = makeAdapter,
   getParent = undefined,
   discoveryRoots = undefined,
+  openShortcutOptions = undefined,
 }) {
   let cached = null;
   const historyFile = path.join(
@@ -339,6 +341,9 @@ export function createService({
     async unlock() {
       const c = await connection();
       return c.manager.unlock();
+    },
+    async openCheckout(input) {
+      return openShortcut(input.path, input.target, openShortcutOptions);
     },
   };
 }

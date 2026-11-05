@@ -42,6 +42,16 @@ const english = {
     "Patches changed after the backup: {patches}",
   "全局插件开关在备份后发生变化：{from} -> {to}":
     "Global plugin switch changed after the backup: {from} -> {to}",
+  在终端中打开: "Open in terminal",
+  在文件管理器中打开: "Open in file manager",
+  "在终端中打开 {plugin} 源码目录": "Open {plugin} source checkout in terminal",
+  "在文件管理器中打开 {plugin} 源码目录":
+    "Open {plugin} source checkout in file manager",
+  已打开终端: "Terminal opened",
+  已在文件管理器中打开: "Opened in file manager",
+  "打开失败：{error}": "Failed to open: {error}",
+  "当前平台不支持该快捷方式。": "Shortcut unsupported on this platform.",
+  未知错误: "Unknown error",
   "改动文件：{files}": "Changed files: {files}",
   "配置仓库沿用该插件已发布的版本。":
     "The configuration repository keeps this plugin's previously published version.",
