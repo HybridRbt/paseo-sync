@@ -919,6 +919,125 @@ test("a dirty Git plugin after a modern backup discloses drift and disables conf
   );
   assert.deepEqual(f.calls, []);
 });
+test("a modified patch after backup discloses patch drift and disables confirm", async (t) => {
+  const f = await fixture(t, { installed: true, patch: true });
+  const row = (await f.adapter.list())[0];
+  const plan = await buildPlan(f.ctx);
+  const result = await applyPlan(f.ctx, plan.approval);
+
+  // Edit the patched file after the backup
+  await writeFile(
+    path.join(row.path, "index.client.tsx"),
+    'icon="ExternalDrift"',
+  );
+
+  const preview = await restorePlan(f.ctx, result.backupId);
+  assert.ok(preview.currentChangedSinceBackup);
+  assert.deepEqual(preview.currentChangedSinceBackup.patches, [
+    "better-paseo/index.client.tsx",
+  ]);
+
+  const { translator, canConfirmPreview, renderDriftDisclosure } =
+    await import("../client/i18n.mjs");
+  const clientPreview = { ...preview, confirmKind: "restore" };
+  assert.equal(canConfirmPreview(clientPreview), false);
+
+  for (const language of ["zh", "en"]) {
+    const tLang = translator(language),
+      lines = renderDriftDisclosure(preview.currentChangedSinceBackup, tLang),
+      rendered = lines.join("\n");
+    assert.ok(
+      rendered.includes("better-paseo/index.client.tsx"),
+      `${language}: missing patch key`,
+    );
+    if (language === "en") {
+      assert.ok(
+        rendered.includes("Patches changed after the backup:"),
+        "en: missing label",
+      );
+    } else {
+      assert.ok(
+        rendered.includes("补丁在备份后发生变化："),
+        "zh: missing label",
+      );
+    }
+  }
+
+  await assert.rejects(
+    restore(f.ctx, result.backupId, preview.approval),
+    /patches: better-paseo\/index\.client\.tsx/,
+  );
+});
+test("a clean Git revision update after backup is disclosed as plugin drift rather than HEAD mismatch", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process");
+  const row = (await f.adapter.list())[0];
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", row.path, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha1 = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = sha1;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha1,
+    };
+    return rows;
+  };
+  const p = await buildPlan(f.ctx),
+    r = await applyPlan(f.ctx, p.approval);
+
+  // Legitimate update: new commit committed, checkout clean, installed revision updated
+  await writeFile(path.join(row.path, "index.client.tsx"), 'icon="V2"');
+  git("commit", "-qam", "v2");
+  const sha2 = git("rev-parse", "HEAD");
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha2,
+    };
+    return rows;
+  };
+
+  const preview = await restorePlan(f.ctx, r.backupId);
+  assert.ok(preview.currentChangedSinceBackup);
+  // Source checkout is clean and matches installed revision, so source drift is empty
+  assert.deepEqual(preview.currentChangedSinceBackup.source, []);
+  // Tracked solely as plugin configuration change
+  assert.ok(
+    preview.currentChangedSinceBackup.plugins.some(
+      (p) => p.plugin === "better-paseo",
+    ),
+  );
+
+  const { translator, canConfirmPreview, renderDriftDisclosure } =
+    await import("../client/i18n.mjs");
+  assert.equal(canConfirmPreview({ ...preview, confirmKind: "restore" }), false);
+
+  for (const language of ["zh", "en"]) {
+    const tLang = translator(language),
+      lines = renderDriftDisclosure(preview.currentChangedSinceBackup, tLang),
+      rendered = lines.join("\n");
+    assert.ok(rendered.includes("better-paseo"), `${language}: better-paseo`);
+    // Crucial: must NOT falsely report that local HEAD differs from installed revision
+    assert.ok(!rendered.includes("head differs") && !rendered.includes("HEAD differs"));
+    assert.ok(!rendered.includes("本机源码与安装版本不一致"));
+  }
+});
 test("legacy schema v1 backups without Git source metadata remain restorable when source is clean", async (t) => {
   const f = await fixture(t, { installed: true }),
     { execFileSync } = await import("node:child_process"),

@@ -34,6 +34,8 @@ const english = {
     "Plugin configuration changed after the backup: {plugins}",
   "设置在备份后发生变化：{settings}":
     "Settings changed after the backup: {settings}",
+  "补丁在备份后发生变化：{patches}":
+    "Patches changed after the backup: {patches}",
   "改动文件：{files}": "Changed files: {files}",
   "配置仓库沿用该插件已发布的版本。":
     "The configuration repository keeps this plugin's previously published version.",
@@ -317,6 +319,13 @@ export function renderDriftDisclosure(drift, t) {
     lines.push(
       t("设置在备份后发生变化：{settings}", {
         settings: drift.settings.join(", "),
+      }),
+    );
+  }
+  if (drift.patches?.length) {
+    lines.push(
+      t("补丁在备份后发生变化：{patches}", {
+        patches: drift.patches.join(", "),
       }),
     );
   }

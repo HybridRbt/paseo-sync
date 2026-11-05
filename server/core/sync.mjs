@@ -190,23 +190,22 @@ function backupDrift(afterState, currentState, includeSource = true) {
     if (includeSource && !same(ap?.sourceState, cp?.sourceState)) {
       const curPlugin = currentState.plugins[id];
       const curSource = cp?.sourceState;
-      const prevSource = ap?.sourceState;
-      let reason = "local-source-changes";
-      if (curSource?.clean === false) {
-        reason =
-          curSource.head === curPlugin?.descriptor?.revision
-            ? "local-source-changes"
-            : "head-differs";
-      } else if (curSource?.head !== prevSource?.head) {
-        reason = "head-differs";
+      const isDirty = curSource?.clean === false;
+      const headMismatch =
+        Boolean(curSource?.head && curPlugin?.descriptor?.revision) &&
+        curSource.head !== curPlugin.descriptor.revision;
+      if (isDirty || headMismatch) {
+        const reason = isDirty
+          ? (headMismatch ? "head-differs" : "local-source-changes")
+          : "head-differs";
+        source.push({
+          plugin: id,
+          reason,
+          files: curSource?.changed ?? [],
+          head: curSource?.head ?? null,
+          checkout: curPlugin?.path ?? null,
+        });
       }
-      source.push({
-        plugin: id,
-        reason,
-        files: curSource?.changed ?? [],
-        head: curSource?.head ?? null,
-        checkout: curPlugin?.path ?? null,
-      });
     }
 
     const apDesc = ap ? { descriptor: ap.descriptor, status: ap.status } : null;
@@ -230,10 +229,22 @@ function backupDrift(afterState, currentState, includeSource = true) {
     }
   }
 
+  const allPatchKeys = new Set([
+    ...Object.keys(a.patches || {}),
+    ...Object.keys(c.patches || {}),
+  ]);
+  const patches = [];
+  for (const key of allPatchKeys) {
+    if (!same(a.patches[key], c.patches[key])) {
+      patches.push(key);
+    }
+  }
+
   return {
     plugins,
     source,
     settings,
+    patches,
     ...(a.pluginsEnabled !== c.pluginsEnabled
       ? { pluginsEnabled: { from: a.pluginsEnabled, to: c.pluginsEnabled } }
       : {}),
@@ -763,6 +774,8 @@ export async function restore(ctx, id, approval) {
           details.push(`plugins: ${d.plugins.map((p) => p.plugin).join(", ")}`);
         if (d.settings?.length)
           details.push(`settings: ${d.settings.join(", ")}`);
+        if (d.patches?.length)
+          details.push(`patches: ${d.patches.join(", ")}`);
       }
       throw new Error(
         `Current managed data changed after the operation; resolve those changes before restoring.${details.length ? ` (${details.join(", ")})` : ""}`,

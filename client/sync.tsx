@@ -70,6 +70,7 @@ export type Preview = {
           checkout?: string | null;
         }[];
         settings?: string[];
+        patches?: string[];
         pluginsEnabled?: { from: boolean; to: boolean };
       };
 };
