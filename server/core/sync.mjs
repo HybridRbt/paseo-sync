@@ -78,6 +78,37 @@ function baseState(s) {
     patches: s.patches,
   };
 }
+// A plugin skipped by an operation was not synchronized by it. Recording its
+// current, unsynchronized state as the baseline would erase local-change
+// protection: once the source is clean again, a later apply would silently
+// overwrite local settings instead of reporting localConflict. The skipped
+// plugin keeps its previous baseline entries instead.
+function preserveSkippedBaseline(state, previous, profile, ids) {
+  for (const id of ids) {
+    if (previous?.plugins && Object.hasOwn(previous.plugins, id))
+      state.plugins[id] = previous.plugins[id];
+    else delete state.plugins[id];
+    for (const file of Object.keys(state.settings))
+      if (
+        file.startsWith(`settings/${id}/`) ||
+        profile.settings.some((s) => s.plugin === id && s.file === file)
+      )
+        delete state.settings[file];
+    if (previous?.settings)
+      for (const [file, val] of Object.entries(previous.settings))
+        if (
+          file.startsWith(`settings/${id}/`) ||
+          profile.settings.some((s) => s.plugin === id && s.file === file)
+        )
+          state.settings[file] = val;
+    for (const key of Object.keys(state.patches))
+      if (key.startsWith(`${id}/`)) delete state.patches[key];
+    if (previous?.patches)
+      for (const [key, val] of Object.entries(previous.patches))
+        if (key.startsWith(`${id}/`)) state.patches[key] = val;
+  }
+  return state;
+}
 async function settingsFile(ctx, s) {
   return safeFile(ctx.home, `plugin-settings/${s.plugin}/${s.document}.json`);
 }
@@ -344,11 +375,11 @@ async function planData(ctx) {
 export async function buildPlan(ctx) {
   return (await planData(ctx)).plan;
 }
-async function saveBaseline(ctx, current, profile) {
+async function saveBaseline(ctx, profile, state) {
   await writeJson(await safeFile(ctx.state, "baseline.json"), {
     schemaVersion: 1,
     profileHash: profile.hash,
-    ...baseState(current),
+    ...state,
   });
 }
 export async function captureBaseline(ctx, profile, skipIds = new Set()) {
@@ -394,34 +425,16 @@ export async function captureBaseline(ctx, profile, skipIds = new Set()) {
       if (raw === null || digest(Buffer.from(raw, "base64")) !== f.afterSha256)
         throw new Error("Local source patch changed while preparing publish");
     }
-  const state = baseState(current);
-  if (skipIds.size > 0) {
-    const previous = await baseline(ctx);
-    for (const id of skipIds) {
-      if (previous?.plugins && Object.hasOwn(previous.plugins, id))
-        state.plugins[id] = previous.plugins[id];
-      else delete state.plugins[id];
-      for (const file of Object.keys(state.settings))
-        if (
-          file.startsWith(`settings/${id}/`) ||
-          profile.settings.some((s) => s.plugin === id && s.file === file)
-        )
-          delete state.settings[file];
-      if (previous?.settings)
-        for (const [file, val] of Object.entries(previous.settings))
-          if (
-            file.startsWith(`settings/${id}/`) ||
-            profile.settings.some((s) => s.plugin === id && s.file === file)
-          )
-            state.settings[file] = val;
-      for (const key of Object.keys(state.patches))
-        if (key.startsWith(`${id}/`)) delete state.patches[key];
-      if (previous?.patches)
-        for (const [key, val] of Object.entries(previous.patches))
-          if (key.startsWith(`${id}/`)) state.patches[key] = val;
-    }
-  }
-  return { schemaVersion: 1, profileHash: profile.hash, ...state };
+  return {
+    schemaVersion: 1,
+    profileHash: profile.hash,
+    ...preserveSkippedBaseline(
+      baseState(current),
+      await baseline(ctx),
+      profile,
+      skipIds,
+    ),
+  };
 }
 // A plugin skipped by an operation (dirty source, missing-disabled) is outside
 // that operation's verified scope: its acknowledged divergence must not fail
@@ -492,8 +505,26 @@ export async function applyPlan(ctx, approval) {
       );
     if (plan.conflicts.length) throw new Error(plan.conflicts.join("\n"));
     const skippedIds = new Set(plan.skipped.map((s) => s.plugin));
+    // Dirty-skipped plugins were not synchronized by this operation, in either
+    // the skip-only or the mixed-operation path, so their baseline entries keep
+    // recording the last synchronized state. missing-disabled skips keep their
+    // existing baseline behavior.
+    const dirtySkipped = new Set(
+      plan.skipped
+        .filter((s) => s.reason !== "missing-disabled")
+        .map((s) => s.plugin),
+    );
     if (plan.changes.length === 0) {
-      await saveBaseline(ctx, current, profile);
+      await saveBaseline(
+        ctx,
+        profile,
+        preserveSkippedBaseline(
+          baseState(current),
+          previous,
+          profile,
+          dirtySkipped,
+        ),
+      );
       return {
         changed: false,
         backupId: null,
@@ -590,7 +621,18 @@ export async function applyPlan(ctx, approval) {
       throw new Error(`Verification failed: ${JSON.stringify(verification)}`);
     backup.status = "complete";
     await writeJson(filename, backup);
-    await saveBaseline(ctx, backup.after, profile);
+    // backup.after excludes the skipped plugins (recovery scope), so their
+    // previous entries are merged back in.
+    await saveBaseline(
+      ctx,
+      profile,
+      preserveSkippedBaseline(
+        baseState(backup.after),
+        previous,
+        profile,
+        dirtySkipped,
+      ),
+    );
     return {
       changed: true,
       backupId: backup.id,

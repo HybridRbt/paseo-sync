@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { digest, writeJson } from "../server/core/files.mjs";
@@ -642,6 +642,140 @@ test("a Git HEAD drift skips as head-differs with the drifted revision disclosed
   const result = await applyPlan(f.ctx, p.approval);
   assert.equal(result.changed, false);
   assert.deepEqual(f.calls, []);
+});
+test("a dirty skip-only apply preserves the previous baseline so local settings edits stay protected", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process");
+  const row = (await f.adapter.list())[0];
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", row.path, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = sha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha,
+    };
+    return rows;
+  };
+  await writeJson(f.setting, f.target);
+  await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  const edited = { version: 1, values: { previewWrap: false } };
+  await writeJson(f.setting, edited);
+  await writeFile(path.join(row.path, "index.client.tsx"), "local work");
+  const p = await buildPlan(f.ctx);
+  assert.deepEqual(p.skipped.map((s) => s.reason), ["local-source-changes"]);
+  const result = await applyPlan(f.ctx, p.approval);
+  assert.equal(result.changed, false);
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), edited);
+  const baseline = JSON.parse(
+    await readFile(path.join(f.state, "baseline.json"), "utf8"),
+  );
+  assert.equal(baseline.plugins["better-paseo"].revision, sha);
+  assert.deepEqual(
+    JSON.parse(
+      Buffer.from(
+        baseline.settings[f.manifest.settings[0].file],
+        "base64",
+      ).toString("utf8"),
+    ),
+    f.target,
+  );
+  // Converging back to a clean source must re-expose the local settings edit
+  // as a conflict instead of silently overwriting it.
+  await writeFile(path.join(row.path, "index.client.tsx"), 'icon="Github"');
+  const after = await buildPlan(f.ctx);
+  assert.deepEqual(after.skipped, []);
+  assert.ok(after.conflicts.some((x) => /local changes conflict/i.test(x)));
+  await assert.rejects(applyPlan(f.ctx, after.approval));
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), edited);
+});
+test("a mixed apply preserves the dirty skipped plugin's previous baseline entries", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process");
+  const firstmate = {
+    id: "firstmate",
+    source: "npm:firstmate",
+    revision: "0.4.0",
+    enabled: true,
+  };
+  f.manifest.plugins.push(firstmate);
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const row = (await f.adapter.list())[0];
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", row.path, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = sha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows.find((x) => x.id === "better-paseo").installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha,
+    };
+    return rows;
+  };
+  await writeJson(f.setting, f.target);
+  await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  firstmate.revision = "0.5.0";
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const edited = { version: 1, values: { previewWrap: false } };
+  await writeJson(f.setting, edited);
+  await writeFile(path.join(row.path, "extra.ts"), "local experiment");
+  const p = await buildPlan(f.ctx);
+  assert.deepEqual(p.skipped.map((s) => s.plugin), ["better-paseo"]);
+  assert.deepEqual(
+    p.changes.map((c) => c.plugin),
+    ["firstmate"],
+  );
+  const result = await applyPlan(f.ctx, p.approval);
+  assert.equal(result.changed, true);
+  assert.equal(result.verification.configurationMatches, true);
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), edited);
+  // backup.after excludes the skipped plugin; its previous entries must be
+  // merged back into the saved baseline.
+  const baseline = JSON.parse(
+    await readFile(path.join(f.state, "baseline.json"), "utf8"),
+  );
+  assert.equal(baseline.plugins["better-paseo"].revision, sha);
+  assert.equal(baseline.plugins.firstmate.revision, "0.5.0");
+  assert.deepEqual(
+    JSON.parse(
+      Buffer.from(
+        baseline.settings[f.manifest.settings[0].file],
+        "base64",
+      ).toString("utf8"),
+    ),
+    f.target,
+  );
+  await rm(path.join(row.path, "extra.ts"));
+  const after = await buildPlan(f.ctx);
+  assert.deepEqual(after.skipped, []);
+  assert.ok(after.conflicts.some((x) => /local changes conflict/i.test(x)));
 });
 test("legacy schema v1 backups without Git source metadata remain restorable when source is clean", async (t) => {
   const f = await fixture(t, { installed: true }),
