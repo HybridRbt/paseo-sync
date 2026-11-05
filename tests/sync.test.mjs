@@ -704,7 +704,7 @@ test("a dirty Git plugin is skipped at restore with disclosed files and checkout
     skipLine =
       "跳过 {plugin}：本地源码有未提交改动，本次恢复不改动该插件。",
     guidance =
-      "该插件本次保持本机现状，未被恢复修改。在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览恢复即可恢复备份中的版本。";
+      "该插件本次保持本机现状，未被恢复修改。完成本次恢复后，在插件源码仓库提交并推送，运行 paseo plugin update {plugin}，再重新预览恢复即可恢复备份中的版本。";
   for (const language of ["zh", "en"]) {
     const t = translator(language),
       rendered = [
@@ -807,6 +807,162 @@ test("a drifted Git HEAD skips at restore as head-differs and keeps the local so
     'icon="Two"',
   );
   assert.deepEqual(f.calls, []);
+});
+test("following the restore skip guidance recovers the plugin without tripping the snapshot guard", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process"),
+    checkout = (await f.adapter.list())[0].path;
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", checkout, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha = git("rev-parse", "HEAD");
+  const descriptor = {
+    id: "better-paseo",
+    source: "git:https://github.com/example/demo",
+    revision: sha,
+    enabled: true,
+  };
+  f.manifest.plugins[0].source = descriptor.source;
+  f.manifest.plugins[0].revision = sha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  // The daemon reports Git identity for the checkout regardless of which
+  // revision-named directory the fake installer last created; revisions move
+  // only through adapter.update, as they would through the real CLI.
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].path = checkout;
+    rows[0].installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: rows[0].installation.currentRevision,
+    };
+    return rows;
+  };
+  await f.adapter.update(descriptor);
+  const p = await buildPlan(f.ctx),
+    r = await applyPlan(f.ctx, p.approval),
+    file = path.join(f.state, "backups", r.backupId + ".json"),
+    b = JSON.parse(await readFile(file, "utf8"));
+  // A legacy backup without source-state metadata: dirtiness is not a
+  // post-operation change, so the first restore skips and discloses.
+  for (const state of [b.before, b.after])
+    for (const plugin of Object.values(state.plugins))
+      if (plugin) delete plugin.sourceState;
+  await writeJson(file, b);
+  f.calls.length = 0;
+  await writeFile(path.join(checkout, "extra.ts"), "local experiment");
+  const first = await restorePlan(f.ctx, r.backupId);
+  assert.equal(first.currentChangedSinceBackup, false);
+  assert.equal(first.skipped.length, 1);
+  const partial = await restore(f.ctx, r.backupId, first.approval);
+  assert.equal(partial.restored, true);
+  assert.deepEqual(f.calls, []);
+  // The partial restore rewrote after with a source-aware snapshot recording
+  // the dirty checkout. The user follows the guidance: commit, push, then
+  // paseo plugin update resolves the checkout at a new revision.
+  git("add", "extra.ts");
+  git("commit", "-qm", "keep experiment");
+  const resolved = git("rev-parse", "HEAD");
+  await f.adapter.update({ ...descriptor, revision: resolved });
+  f.calls.length = 0;
+  const retry = await restorePlan(f.ctx, r.backupId);
+  assert.deepEqual(retry.skipped, []);
+  assert.equal(retry.currentChangedSinceBackup, false);
+  const done = await restore(f.ctx, r.backupId, retry.approval);
+  assert.equal(done.restored, true);
+  assert.ok(
+    f.calls.some((c) => c[0] === "update" && c[2] === sha),
+    `expected a reinstall of the backed-up revision ${sha}: ${JSON.stringify(f.calls)}`,
+  );
+  await assert.rejects(readFile(f.setting));
+});
+test("a failed apply that captured a dirty source stays restorable after the checkout is resolved", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process");
+  const row = (await f.adapter.list())[0];
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", row.path, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = sha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha,
+    };
+    return rows;
+  };
+  const p = await buildPlan(f.ctx),
+    r = await applyPlan(f.ctx, p.approval),
+    file = path.join(f.state, "backups", r.backupId + ".json"),
+    b = JSON.parse(await readFile(file, "utf8"));
+  // The apply failed after the local source went dirty: its final capture
+  // records the divergence in after.
+  b.status = "failed";
+  b.error = "simulated apply failure";
+  b.after.plugins["better-paseo"].sourceState = {
+    clean: false,
+    head: sha,
+    statusHash: "observed",
+    changed: ["extra.ts"],
+  };
+  await writeJson(file, b);
+  f.calls.length = 0;
+  await writeFile(path.join(row.path, "extra.ts"), "local experiment");
+  const first = await restorePlan(f.ctx, r.backupId);
+  assert.deepEqual(first.conflicts, []);
+  assert.equal(first.currentChangedSinceBackup, false);
+  assert.deepEqual(first.skipped, [
+    {
+      plugin: "better-paseo",
+      reason: "local-source-changes",
+      files: ["extra.ts"],
+      checkout: row.path,
+      restore: true,
+    },
+  ]);
+  // Resolving by discarding the edits must not invalidate the backup either.
+  git("clean", "-fq", "--", "extra.ts");
+  const retry = await restorePlan(f.ctx, r.backupId);
+  assert.deepEqual(retry.skipped, []);
+  assert.equal(retry.currentChangedSinceBackup, false);
+  await restore(f.ctx, r.backupId, retry.approval);
+  assert.deepEqual(f.calls, [
+    ["disable", "better-paseo"],
+    ["enable", "better-paseo"],
+  ]);
+  await assert.rejects(readFile(f.setting));
+});
+test("restore still refuses when unrelated managed data changed after the operation", async (t) => {
+  const f = await fixture(t, { installed: true });
+  const r = await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
+  const preview = await restorePlan(f.ctx, r.backupId);
+  assert.equal(preview.currentChangedSinceBackup, true);
+  await assert.rejects(
+    restore(f.ctx, r.backupId, preview.approval),
+    /changed after the operation/,
+  );
 });
 test("legacy schema v1 backups without Git source metadata remain restorable when source is clean", async (t) => {
   const f = await fixture(t, { installed: true }),

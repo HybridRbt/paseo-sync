@@ -642,6 +642,31 @@ export async function restorePlan(ctx, id) {
     }
   }
   const skippedIds = new Set(skipped.map((s) => s.plugin));
+  // A dirty local source is outside the snapshot guard whether this preview
+  // discloses it as a skip or the operation's own final snapshot recorded it
+  // dirty (a failed apply, or a restore that skipped the plugin and captured
+  // the divergence): the repair guidance tells the user to resolve the
+  // checkout and preview again, so neither the dirtiness nor its resolution
+  // may invalidate the backup. Settings and every other plugin stay guarded.
+  const outsideGuard = new Set(
+    [current, b.after]
+      .filter(Boolean)
+      .flatMap((s) =>
+        Object.entries(s.plugins)
+          .filter(([, p]) => p?.sourceState?.clean === false)
+          .map(([plugin]) => plugin),
+      ),
+  );
+  const guarded = (s) => {
+    const c = comparable(s, includesSourceMetadata);
+    if (!outsideGuard.size) return c;
+    return {
+      ...c,
+      plugins: Object.fromEntries(
+        Object.entries(c.plugins).filter(([p]) => !outsideGuard.has(p)),
+      ),
+    };
+  };
   return {
     backupId: id,
     changes: b.profile.manifest.plugins
@@ -663,11 +688,7 @@ export async function restorePlan(ctx, id) {
     conflicts,
     skipped,
     currentChangedSinceBackup:
-      b.after !== null &&
-      !same(
-        comparable(current, includesSourceMetadata),
-        comparable(b.after, includesSourceMetadata),
-      ),
+      b.after !== null && !same(guarded(current), guarded(b.after)),
     warnings: [
       "Restore may reinstall previous pinned versions using the network. New plugins are disabled and retained to preserve their data.",
     ],
