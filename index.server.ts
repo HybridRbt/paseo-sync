@@ -1,7 +1,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import { syncSettings } from "./shared/settings";
-import { startRpc, jobRpc, unlockRpc, discoverRpc } from "./shared/rpc";
+import { startRpc, jobRpc, unlockRpc, discoverRpc, openCheckoutRpc } from "./shared/rpc";
 import { createService } from "./server/service.mjs";
 import { publicError } from "./server/jobs.mjs";
 export default function contribute(server: PluginServerContext) {
@@ -27,5 +27,8 @@ export default function contribute(server: PluginServerContext) {
     guarded(async () => z.json().parse(await service.getJob(input.id))),
   );
   server.handle(unlockRpc, () => guarded(() => service.unlock()));
+  server.handle(openCheckoutRpc, (input) =>
+    guarded(() => service.openCheckout(input)),
+  );
   return () => {};
 }

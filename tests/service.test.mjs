@@ -114,3 +114,26 @@ test("discovery reads saved repository without a working CLI and remembers succe
   const found = await s.discover({});
   assert.ok(found.candidates.some((c) => c.checkout === root));
 });
+
+test("service.openCheckout dispatches shortcut open to openShortcut handler", async () => {
+  const f = await fixture();
+  const opened = [];
+  const s = service.createService({
+    ...f,
+    openShortcutOptions: {
+      platform: "darwin",
+      exec: (cmd, args, opts, cb) => {
+        opened.push({ cmd, args });
+        cb(null);
+      },
+    },
+  });
+  const res = await s.openCheckout({
+    path: f.settings.checkout,
+    target: "terminal",
+  });
+  assert.deepEqual(res, { status: "opened" });
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].cmd, "/usr/bin/open");
+  assert.deepEqual(opened[0].args, ["-a", "Terminal", f.settings.checkout]);
+});

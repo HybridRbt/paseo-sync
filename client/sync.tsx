@@ -11,7 +11,7 @@ import {
 import { useEffect, useState, useRef } from "react";
 import { ScrollView, Text, View, Pressable } from "react-native";
 import { syncSettings } from "../shared/settings";
-import { startRpc, jobRpc, unlockRpc, discoverRpc } from "../shared/rpc";
+import { startRpc, jobRpc, unlockRpc, discoverRpc, openCheckoutRpc } from "../shared/rpc";
 import type { z } from "zod";
 import {
   translator,
@@ -124,7 +124,8 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
     discover = useRpc(discoverRpc),
     start = useRpc(startRpc),
     getJob = useRpc(jobRpc),
-    unlock = useRpc(unlockRpc);
+    unlock = useRpc(unlockRpc),
+    openCheckout = useRpc(openCheckoutRpc);
   const [draft, setDraft] = useState({
     checkout: "",
     repositoryUrl: "",
@@ -733,7 +734,11 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
               <ResultSummary
                 value={result}
                 color={theme.colors.foreground}
+                theme={theme}
                 t={t}
+                onOpenCheckout={(path, target) =>
+                  openCheckout({ path, target })
+                }
               />
               <Pressable
                 accessibilityRole="button"
@@ -803,14 +808,154 @@ function jobProgress(job: Job | null): number {
   return PHASE_PROGRESS[job.phase ?? ""] ?? 0.1;
 }
 
+export function CheckoutShortcuts({
+  plugin,
+  checkout,
+  theme,
+  t,
+  onOpen,
+}: {
+  plugin: string;
+  checkout: string;
+  theme?: PluginSurfaceProps["theme"];
+  t: ReturnType<typeof translator>;
+  onOpen?: (
+    path: string,
+    target: "terminal" | "fileManager",
+  ) => Promise<{ status: "opened" | "unsupported" | "failed"; error?: string }>;
+}) {
+  const [opening, setOpening] = useState<"terminal" | "fileManager" | null>(
+    null,
+  );
+  const [status, setStatus] = useState<{
+    type: "terminal" | "fileManager";
+    status: "opened" | "unsupported" | "failed";
+    error?: string;
+  } | null>(null);
+
+  async function handleOpen(target: "terminal" | "fileManager") {
+    if (!onOpen || opening) return;
+    setOpening(target);
+    setStatus(null);
+    try {
+      const res = await onOpen(checkout, target);
+      setStatus({ type: target, status: res.status, error: res.error });
+    } catch (e) {
+      setStatus({
+        type: target,
+        status: "failed",
+        error: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setOpening(null);
+    }
+  }
+
+  const borderCol = theme?.colors?.border ?? "#ccc";
+  const bgCol = theme?.colors?.surface1 ?? "#f5f5f5";
+  const fgCol = theme?.colors?.foreground ?? "#000";
+  const mutedCol = theme?.colors?.foregroundMuted ?? "#666";
+  const dangerCol = theme?.colors?.statusDanger ?? "#d32f2f";
+  const successCol = theme?.colors?.statusSuccess ?? "#388e3c";
+
+  return (
+    <View style={{ gap: 4 }}>
+      <View
+        style={{
+          flexDirection: "row",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: 8,
+        }}
+      >
+        <Text style={{ fontSize: 13, fontWeight: "500", color: fgCol }}>
+          {plugin}:
+        </Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={t("在终端中打开 {plugin} 源码目录", { plugin })}
+          disabled={Boolean(opening)}
+          style={{
+            paddingVertical: 4,
+            paddingHorizontal: 8,
+            borderRadius: 4,
+            borderWidth: 1,
+            borderColor: borderCol,
+            backgroundColor: bgCol,
+            opacity: opening === "terminal" ? 0.6 : 1,
+          }}
+          onPress={() => void handleOpen("terminal")}
+        >
+          <Text style={{ fontSize: 12, color: fgCol }}>
+            {t("在终端中打开")}
+          </Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={t("在文件管理器中打开 {plugin} 源码目录", {
+            plugin,
+          })}
+          disabled={Boolean(opening)}
+          style={{
+            paddingVertical: 4,
+            paddingHorizontal: 8,
+            borderRadius: 4,
+            borderWidth: 1,
+            borderColor: borderCol,
+            backgroundColor: bgCol,
+            opacity: opening === "fileManager" ? 0.6 : 1,
+          }}
+          onPress={() => void handleOpen("fileManager")}
+        >
+          <Text style={{ fontSize: 12, color: fgCol }}>
+            {t("在文件管理器中打开")}
+          </Text>
+        </Pressable>
+      </View>
+      {status ? (
+        <Text
+          selectable
+          style={{
+            fontSize: 12,
+            paddingLeft: 4,
+            color:
+              status.status === "opened"
+                ? successCol
+                : status.status === "failed"
+                  ? dangerCol
+                  : mutedCol,
+          }}
+        >
+          {status.status === "opened"
+            ? status.type === "terminal"
+              ? t("已打开终端")
+              : t("已在文件管理器中打开")
+            : status.status === "unsupported"
+              ? t("当前平台不支持该快捷方式。")
+              : t("打开失败：{error}", {
+                  error: status.error || t("未知错误"),
+                })}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
 export function ResultSummary({
   value,
   color,
   t,
+  theme,
+  onOpenCheckout,
 }: {
   value: unknown;
   color: string;
   t: ReturnType<typeof translator>;
+  theme?: PluginSurfaceProps["theme"];
+  onOpenCheckout?: (
+    path: string,
+    target: "terminal" | "fileManager",
+  ) => Promise<{ status: "opened" | "unsupported" | "failed"; error?: string }>;
 }) {
   const r = (value ?? {}) as {
     conflicts?: string[];
@@ -867,18 +1012,37 @@ export function ResultSummary({
         </Text>
       ))}
       {r.currentChangedSinceBackup ? (
-        <View style={{ gap: 4 }}>
-          {renderDriftDisclosure(r.currentChangedSinceBackup, t).map(
-            (line: string, idx: number) => (
-              <Text
-                selectable
-                key={idx}
-                style={[text, idx > 0 ? { paddingLeft: 8 } : null]}
-              >
-                {line}
-              </Text>
-            ),
-          )}
+        <View style={{ gap: 6 }}>
+          <View style={{ gap: 4 }}>
+            {renderDriftDisclosure(r.currentChangedSinceBackup, t).map(
+              (line: string, idx: number) => (
+                <Text
+                  selectable
+                  key={idx}
+                  style={[text, idx > 0 ? { paddingLeft: 8 } : null]}
+                >
+                  {line}
+                </Text>
+              ),
+            )}
+          </View>
+          {typeof r.currentChangedSinceBackup === "object" &&
+          r.currentChangedSinceBackup.source?.some((s) => s.checkout) ? (
+            <View style={{ gap: 8, paddingLeft: 8, paddingTop: 4 }}>
+              {r.currentChangedSinceBackup.source
+                .filter((s) => Boolean(s.checkout))
+                .map((s) => (
+                  <CheckoutShortcuts
+                    key={s.plugin}
+                    plugin={s.plugin}
+                    checkout={s.checkout!}
+                    theme={theme}
+                    t={t}
+                    onOpen={onOpenCheckout}
+                  />
+                ))}
+            </View>
+          ) : null}
         </View>
       ) : null}
       {r.skipped?.map((s) =>
@@ -903,6 +1067,17 @@ export function ResultSummary({
               <Text selectable style={text}>
                 {t("本机源码目录：{checkout}", { checkout: s.checkout })}
               </Text>
+              {s.checkout ? (
+                <View style={{ paddingLeft: 8, paddingTop: 2 }}>
+                  <CheckoutShortcuts
+                    plugin={s.plugin}
+                    checkout={s.checkout}
+                    theme={theme}
+                    t={t}
+                    onOpen={onOpenCheckout}
+                  />
+                </View>
+              ) : null}
               <Text selectable style={text}>
                 {t(
                   "该插件本次保持本机现状，未被恢复修改。完成本次恢复后，在插件源码仓库提交并推送，运行 paseo plugin update {plugin}，再重新预览恢复即可恢复备份中的版本。",
@@ -929,6 +1104,17 @@ export function ResultSummary({
               <Text selectable style={text}>
                 {t("本机源码目录：{checkout}", { checkout: s.checkout })}
               </Text>
+              {s.checkout ? (
+                <View style={{ paddingLeft: 8, paddingTop: 2 }}>
+                  <CheckoutShortcuts
+                    plugin={s.plugin}
+                    checkout={s.checkout}
+                    theme={theme}
+                    t={t}
+                    onOpen={onOpenCheckout}
+                  />
+                </View>
+              ) : null}
               <Text selectable style={text}>
                 {t(
                   "该插件本次保持本机现状，未被同步修改。在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览差异即可同步新版本。",

@@ -63,3 +63,18 @@ export const discoverRpc = defineRpc({
     scanned: z.number(),
   }),
 });
+
+export const openCheckoutRpc = defineRpc({
+  name: "sync.open-checkout",
+  input: z.object({
+    path: z
+      .string()
+      .max(4096)
+      .refine((s) => !/[\x00-\x1f]/.test(s)),
+    target: z.enum(["terminal", "fileManager"]),
+  }),
+  output: z.object({
+    status: z.enum(["opened", "unsupported", "failed"]),
+    error: z.string().optional(),
+  }),
+});
