@@ -32,6 +32,7 @@ async function fixture() {
     home,
     historyFile: path.join(base, "history.json"),
     roots: [home],
+    maxMs: null,
   };
 }
 async function repo(root, origin = "https://github.com/example/profile.git") {
@@ -158,4 +159,38 @@ test("time budget also covers saved-path probing, not only the scan loop", async
   assert.equal(r.selected, null);
   assert.equal(r.limited, true);
   assert.equal(r.savedInvalid, false);
+});
+
+test("scan loop stops and marks results limited when clock advances past deadline", async () => {
+  const f = await fixture();
+  await repo(path.join(f.home, "repo1"));
+  await repo(path.join(f.home, "repo2"));
+  let currentTime = 1000;
+  let calls = 0;
+  const now = () => {
+    calls++;
+    if (calls > 2) currentTime = 2000;
+    return currentTime;
+  };
+  const r = await discoverRepositories({
+    ...f,
+    maxMs: 500,
+    now,
+  });
+  assert.equal(r.limited, true);
+  assert.ok(r.candidates.length < 2);
+  assert.equal(r.selected, null);
+});
+
+test("disabling time budget allows discovery without deadline truncation", async () => {
+  const f = await fixture();
+  await repo(path.join(f.home, "repo1"));
+  await repo(path.join(f.home, "repo2"));
+  const r = await discoverRepositories({
+    ...f,
+    maxMs: null,
+  });
+  assert.equal(r.limited, false);
+  assert.equal(r.candidates.length, 2);
+  assert.equal(r.selected, null);
 });
