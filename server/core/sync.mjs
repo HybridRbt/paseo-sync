@@ -188,8 +188,8 @@ function backupDrift(a, c, currentState = null) {
     const apDesc = ap ? { descriptor: ap.descriptor, status: ap.status } : null;
     const cpDesc = cp ? { descriptor: cp.descriptor, status: cp.status } : null;
 
-    if (includeSource && !same(ap?.sourceState, cp?.sourceState)) {
-      const curPlugin = currentState.plugins[id];
+    if (!same(ap?.sourceState, cp?.sourceState)) {
+      const curPlugin = currentState?.plugins?.[id];
       const curSource = cp?.sourceState;
       const prevSource = ap?.sourceState;
       const isDirty = curSource?.clean === false;

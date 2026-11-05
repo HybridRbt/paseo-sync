@@ -959,18 +959,20 @@ test("restore still refuses when unrelated managed data changed after the operat
   await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
   const preview = await restorePlan(f.ctx, r.backupId);
   assert.ok(preview.currentChangedSinceBackup);
-  assert.deepEqual(preview.currentChangedSinceBackup.settings, ["example.json"]);
+  assert.deepEqual(preview.currentChangedSinceBackup.settings, [
+    "settings/better-paseo/presentation.json",
+  ]);
   const { canConfirmPreview, translator, renderDriftDisclosure } =
     await import("../client/i18n.mjs");
   assert.equal(canConfirmPreview({ ...preview, confirmKind: "restore" }), false);
   for (const language of ["zh", "en"]) {
     const tLang = translator(language);
     const rendered = renderDriftDisclosure(preview.currentChangedSinceBackup, tLang).join("\n");
-    assert.ok(rendered.includes("example.json"));
+    assert.ok(rendered.includes("settings/better-paseo/presentation.json"));
   }
   await assert.rejects(
     restore(f.ctx, r.backupId, preview.approval),
-    /changed after the operation; resolve those changes before restoring. \(settings: example.json\)/,
+    /changed after the operation; resolve those changes before restoring. \(settings: settings\/better-paseo\/presentation.json\)/,
   );
 });
 test("local edits to a managed patch file of a dirty Git plugin do not block the restore", async (t) => {
@@ -1102,7 +1104,9 @@ test("unrelated managed data drift alongside a dirty Git plugin discloses drift 
   ]);
   // Settings drift trips currentChangedSinceBackup
   assert.ok(preview.currentChangedSinceBackup);
-  assert.deepEqual(preview.currentChangedSinceBackup.settings, ["example.json"]);
+  assert.deepEqual(preview.currentChangedSinceBackup.settings, [
+    "settings/better-paseo/presentation.json",
+  ]);
 
   const { translator, canConfirmPreview, renderDriftDisclosure } =
     await import("../client/i18n.mjs");
@@ -1112,13 +1116,13 @@ test("unrelated managed data drift alongside a dirty Git plugin discloses drift 
   for (const language of ["zh", "en"]) {
     const tLang = translator(language);
     const rendered = renderDriftDisclosure(preview.currentChangedSinceBackup, tLang).join("\n");
-    assert.ok(rendered.includes("example.json"));
+    assert.ok(rendered.includes("settings/better-paseo/presentation.json"));
   }
 
   // Restore rejected due to settings drift
   await assert.rejects(
     restore(f.ctx, r.backupId, preview.approval),
-    /Current managed data changed after the operation; resolve those changes before restoring\. \(settings: example\.json\)/,
+    /Current managed data changed after the operation; resolve those changes before restoring\. \(settings: settings\/better-paseo\/presentation\.json\)/,
   );
 
   // Restore the setting to align with the backup, keeping git checkout dirty
