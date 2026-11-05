@@ -808,6 +808,117 @@ test("a drifted Git HEAD skips at restore as head-differs and keeps the local so
   );
   assert.deepEqual(f.calls, []);
 });
+test("a dirty Git plugin after a modern backup discloses drift and disables confirm", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process");
+  const row = (await f.adapter.list())[0];
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", row.path, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const sha = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = sha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {
+      identity: { kind: "git", remote: "https://github.com/example/demo" },
+      currentRevision: sha,
+    };
+    return rows;
+  };
+  const p = await buildPlan(f.ctx),
+    r = await applyPlan(f.ctx, p.approval);
+  // Modern backup has sourceState metadata preserved (we do not delete sourceState).
+  f.calls.length = 0;
+  await writeFile(path.join(row.path, "extra.ts"), "local experiment");
+
+  const preview = await restorePlan(f.ctx, r.backupId);
+  assert.deepEqual(preview.conflicts, []);
+  assert.ok(preview.currentChangedSinceBackup);
+  assert.deepEqual(preview.currentChangedSinceBackup.source, [
+    {
+      plugin: "better-paseo",
+      reason: "local-source-changes",
+      files: ["extra.ts"],
+      head: sha,
+      checkout: row.path,
+    },
+  ]);
+
+  // Client confirmation must be disabled
+  const { translator, canConfirmPreview, renderDriftDisclosure } =
+    await import("../client/i18n.mjs");
+  const clientPreview = {
+    ...preview,
+    confirmKind: "restore",
+  };
+  assert.equal(canConfirmPreview(clientPreview), false);
+  assert.equal(
+    canConfirmPreview({ ...clientPreview, currentChangedSinceBackup: false }),
+    true,
+  );
+
+  // Assert drift disclosure in both languages
+  for (const language of ["zh", "en"]) {
+    const tLang = translator(language),
+      lines = renderDriftDisclosure(preview.currentChangedSinceBackup, tLang),
+      rendered = lines.join("\n");
+    for (const expected of [
+      "better-paseo",
+      "extra.ts",
+      row.path,
+    ]) {
+      assert.ok(rendered.includes(expected), `${language}: ${expected}`);
+    }
+    if (language === "en") {
+      assert.ok(
+        rendered.includes(
+          "Current managed data changed after the backup; resolve those changes before restoring:",
+        ),
+      );
+      assert.ok(rendered.includes("local source has uncommitted changes"));
+      assert.ok(
+        rendered.includes(
+          "Commit or discard changes in the plugin source repository, then preview the restore again.",
+        ),
+      );
+    } else {
+      assert.ok(
+        rendered.includes(
+          "备份生成后本机数据已发生变化，需先处理变更后方可恢复：",
+        ),
+      );
+      assert.ok(rendered.includes("本地源码有未提交改动"));
+      assert.ok(
+        rendered.includes(
+          "在插件源码仓库提交或撤销改动后，重新预览恢复。",
+        ),
+      );
+    }
+  }
+
+  // Confirming restore fails with actionable disclosure
+  await assert.rejects(
+    restore(f.ctx, r.backupId, preview.approval),
+    /Current managed data changed after the operation; resolve those changes before restoring\. \(source: better-paseo\)/,
+  );
+  // Local files and state remain completely untouched
+  assert.equal(
+    await readFile(path.join(row.path, "extra.ts"), "utf8"),
+    "local experiment",
+  );
+  assert.deepEqual(f.calls, []);
+});
 test("legacy schema v1 backups without Git source metadata remain restorable when source is clean", async (t) => {
   const f = await fixture(t, { installed: true }),
     { execFileSync } = await import("node:child_process"),

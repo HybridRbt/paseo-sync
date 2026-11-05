@@ -18,6 +18,22 @@ const english = {
     "Skipped {plugin}: local source HEAD differs from the installed revision; the restore leaves this plugin untouched.",
   "该插件本次保持本机现状，未被恢复修改。在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览恢复即可恢复备份中的版本。":
     "The plugin keeps its local state untouched this run. Commit and push in the plugin's source repository, run paseo plugin update {plugin}, then preview the restore again to bring the backed-up version back.",
+  "备份生成后本机数据已发生变化，需先处理变更后方可恢复：":
+    "Current managed data changed after the backup; resolve those changes before restoring:",
+  "备份生成后本机数据已发生变化，需先处理变更后方可恢复。":
+    "Current managed data changed after the backup; resolve those changes before restoring.",
+  "插件 {plugin}：本地源码有未提交改动。":
+    "Plugin {plugin}: local source has uncommitted changes.",
+  "插件 {plugin}：本机源码与安装版本不一致。":
+    "Plugin {plugin}: local source HEAD differs from the installed revision.",
+  "在插件源码仓库提交或撤销改动后，重新预览恢复。":
+    "Commit or discard changes in the plugin source repository, then preview the restore again.",
+  "运行 paseo plugin update {plugin} 或对齐提交后，重新预览恢复。":
+    "Run paseo plugin update {plugin} or align HEAD, then preview the restore again.",
+  "插件状态在备份后发生变化：{plugins}":
+    "Plugin configuration changed after the backup: {plugins}",
+  "设置在备份后发生变化：{settings}":
+    "Settings changed after the backup: {settings}",
   "改动文件：{files}": "Changed files: {files}",
   "配置仓库沿用该插件已发布的版本。":
     "The configuration repository keeps this plugin's previously published version.",
@@ -250,4 +266,59 @@ export function saveLanguage(language, storage = clientStorage()) {
   } catch {
     /* The choice still lasts for this client session. */
   }
+}
+export function canConfirmPreview(preview) {
+  if (!preview) return false;
+  return (
+    Boolean(preview.approval) &&
+    Boolean(preview.confirmKind) &&
+    !preview.conflicts?.length &&
+    !preview.currentChangedSinceBackup
+  );
+}
+export function renderDriftDisclosure(drift, t) {
+  if (!drift) return [];
+  if (typeof drift !== "object") {
+    return [t("备份生成后本机数据已发生变化，需先处理变更后方可恢复。")];
+  }
+  const lines = [t("备份生成后本机数据已发生变化，需先处理变更后方可恢复：")];
+  for (const s of drift.source ?? []) {
+    lines.push(
+      t(
+        s.reason === "head-differs"
+          ? "插件 {plugin}：本机源码与安装版本不一致。"
+          : "插件 {plugin}：本地源码有未提交改动。",
+        { plugin: s.plugin },
+      ) +
+        (s.files?.length
+          ? " " + t("改动文件：{files}", { files: s.files.join(", ") })
+          : ""),
+    );
+    if (s.checkout) {
+      lines.push(t("本机源码目录：{checkout}", { checkout: s.checkout }));
+    }
+    lines.push(
+      t(
+        s.reason === "head-differs"
+          ? "运行 paseo plugin update {plugin} 或对齐提交后，重新预览恢复。"
+          : "在插件源码仓库提交或撤销改动后，重新预览恢复。",
+        { plugin: s.plugin },
+      ),
+    );
+  }
+  if (drift.plugins?.length) {
+    lines.push(
+      t("插件状态在备份后发生变化：{plugins}", {
+        plugins: drift.plugins.map((p) => p.plugin).join(", "),
+      }),
+    );
+  }
+  if (drift.settings?.length) {
+    lines.push(
+      t("设置在备份后发生变化：{settings}", {
+        settings: drift.settings.join(", "),
+      }),
+    );
+  }
+  return lines;
 }

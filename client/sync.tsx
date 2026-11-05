@@ -13,7 +13,13 @@ import { ScrollView, Text, View, Pressable } from "react-native";
 import { syncSettings } from "../shared/settings";
 import { startRpc, jobRpc, unlockRpc, discoverRpc } from "../shared/rpc";
 import type { z } from "zod";
-import { translator, readLanguage, saveLanguage } from "./i18n.mjs";
+import {
+  translator,
+  readLanguage,
+  saveLanguage,
+  canConfirmPreview,
+  renderDriftDisclosure,
+} from "./i18n.mjs";
 import { mergeDiscovery, editCheckout } from "../shared/onboarding.mjs";
 import {
   actionGate,
@@ -47,12 +53,27 @@ type Job = {
   backupId?: string;
   result?: unknown;
 };
-type Preview = {
+export type Preview = {
   approval?: string;
   confirmKind?: Request["kind"];
   backupId?: string;
   conflicts?: string[];
+  currentChangedSinceBackup?:
+    | boolean
+    | {
+        plugins?: { plugin: string; from?: unknown; to?: unknown }[];
+        source?: {
+          plugin: string;
+          reason?: string;
+          files?: string[];
+          head?: string | null;
+          checkout?: string | null;
+        }[];
+        settings?: string[];
+        pluginsEnabled?: { from: boolean; to: boolean };
+      };
 };
+export { canConfirmPreview, renderDriftDisclosure };
 // The first-time setup sequence shown at the top of the screen. Labels use the
 // same wording as the matching actions below.
 const SETUP_LABEL: Record<string, string> = {
@@ -262,8 +283,7 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
   const preview = (
     result && typeof result === "object" ? result : {}
   ) as Preview;
-  const canConfirm =
-    !!preview.approval && !!preview.confirmKind && !preview.conflicts?.length;
+  const canConfirm = canConfirmPreview(preview);
   const text = { color: theme.colors.foreground };
   const muted = { color: theme.colors.foregroundMuted };
   const fields = [
@@ -782,7 +802,7 @@ function jobProgress(job: Job | null): number {
   return PHASE_PROGRESS[job.phase ?? ""] ?? 0.1;
 }
 
-function ResultSummary({
+export function ResultSummary({
   value,
   color,
   t,
@@ -793,6 +813,7 @@ function ResultSummary({
 }) {
   const r = (value ?? {}) as {
     conflicts?: string[];
+    currentChangedSinceBackup?: Preview["currentChangedSinceBackup"];
     skipped?: {
       plugin: string;
       reason: string;
@@ -844,6 +865,21 @@ function ResultSummary({
           {c}
         </Text>
       ))}
+      {r.currentChangedSinceBackup ? (
+        <View style={{ gap: 4 }}>
+          {renderDriftDisclosure(r.currentChangedSinceBackup, t).map(
+            (line: string, idx: number) => (
+              <Text
+                selectable
+                key={idx}
+                style={[text, idx > 0 ? { paddingLeft: 8 } : null]}
+              >
+                {line}
+              </Text>
+            ),
+          )}
+        </View>
+      ) : null}
       {r.skipped?.map((s) =>
         s.reason === "local-source-changes" || s.reason === "head-differs" ? (
           s.restore ? (
