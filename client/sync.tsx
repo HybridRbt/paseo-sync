@@ -976,8 +976,8 @@ export function ResultSummary({
     changes?: {
       plugin: string;
       actions: string[];
-      from?: { revision: string } | null;
-      to?: { revision: string };
+      from?: { revision: string; source?: string } | null;
+      to?: { revision: string; source?: string };
       settings?: { document: string; before: unknown; after: unknown }[];
     }[];
     pushUrl?: string;
