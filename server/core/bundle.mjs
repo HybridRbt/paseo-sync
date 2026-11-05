@@ -181,6 +181,44 @@ async function scanFiles(baseDir, currentDir = "", fileList = []) {
   return fileList;
 }
 
+export function matchPattern(p, pat) {
+  if (pat.endsWith("/")) {
+    return p.startsWith(pat) || p === pat.slice(0, -1);
+  }
+  if (!pat.includes("*")) {
+    return p === pat;
+  }
+  const regexStr = pat
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*\//g, ".*")
+    .replace(/\*/g, "[^/]*");
+  return new RegExp("^" + regexStr + "$").test(p);
+}
+
+export function isPkgFileMatch(relPath, patterns) {
+  const normalized = relPath.replace(/\\/g, "/");
+  const base = path.basename(normalized);
+  if (
+    base === "package.json" ||
+    base === "paseo-plugin.json" ||
+    /^README(\..+)?$/i.test(base) ||
+    /^LICENSE(\..+)?$/i.test(base) ||
+    /^LICENCE(\..+)?$/i.test(base)
+  ) {
+    return true;
+  }
+  let matched = false;
+  for (const raw of patterns) {
+    if (raw.startsWith("!")) {
+      const pat = raw.slice(1);
+      if (matchPattern(normalized, pat)) return false;
+    } else {
+      if (matchPattern(normalized, raw)) matched = true;
+    }
+  }
+  return matched;
+}
+
 /**
  * Packs a plugin directory into a deterministic .tar.gz buffer.
  */
@@ -188,10 +226,23 @@ export async function packPluginDirectory(sourceDir, options = {}) {
   const maxSizeBytes = options.maxSizeBytes ?? DEFAULT_MAX_SIZE_BYTES;
   const relFiles = await scanFiles(sourceDir);
 
+  let pkgFiles = null;
+  try {
+    const pkg = JSON.parse(
+      await readFile(path.join(sourceDir, "package.json"), "utf8"),
+    );
+    if (Array.isArray(pkg?.files) && pkg.files.length > 0) {
+      pkgFiles = pkg.files;
+    }
+  } catch {}
+
   let totalSize = 0;
   const entries = [];
 
   for (const relPath of relFiles) {
+    if (pkgFiles && !isPkgFileMatch(relPath, pkgFiles)) {
+      continue;
+    }
     const content = await readFile(path.join(sourceDir, relPath));
     totalSize += content.length;
     if (totalSize > maxSizeBytes) {

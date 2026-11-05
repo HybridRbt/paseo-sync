@@ -116,3 +116,40 @@ test("packPluginDirectory rejects plugins exceeding max bundle size", async () =
     await rm(src, { recursive: true, force: true });
   }
 });
+
+test("packPluginDirectory respects package.json files array when defined", async () => {
+  const src = await mkdtemp(path.join(tmpdir(), "bundle-pkg-files-"));
+  const dst = await mkdtemp(path.join(tmpdir(), "bundle-pkg-dst-"));
+  try {
+    await writeFile(
+      path.join(src, "package.json"),
+      JSON.stringify({
+        name: "test-plugin",
+        files: ["client/", "server/", "README.md", "!server/test.js"],
+      }),
+    );
+    await writeFile(
+      path.join(src, "paseo-plugin.json"),
+      JSON.stringify({ id: "test-plugin" }),
+    );
+    await writeFile(path.join(src, "README.md"), "# Test Plugin");
+    await mkdir(path.join(src, "client"), { recursive: true });
+    await writeFile(path.join(src, "client/index.js"), "client code");
+    await mkdir(path.join(src, "server"), { recursive: true });
+    await writeFile(path.join(src, "server/index.js"), "server code");
+    await writeFile(path.join(src, "server/test.js"), "test code (excluded)");
+    await mkdir(path.join(src, "docs"), { recursive: true });
+    await writeFile(path.join(src, "docs/large.png"), "huge doc screenshot");
+
+    const packed = await packPluginDirectory(src);
+    const res = await unpackBundle(packed.buffer, dst);
+    assert.equal(res.fileCount, 5); // package.json, paseo-plugin.json, README.md, client/index.js, server/index.js
+    assert.equal(await readFile(path.join(dst, "client/index.js"), "utf8"), "client code");
+    assert.equal(await readFile(path.join(dst, "server/index.js"), "utf8"), "server code");
+    await assert.rejects(async () => readFile(path.join(dst, "server/test.js")));
+    await assert.rejects(async () => readFile(path.join(dst, "docs/large.png")));
+  } finally {
+    await rm(src, { recursive: true, force: true });
+    await rm(dst, { recursive: true, force: true });
+  }
+});

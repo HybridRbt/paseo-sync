@@ -9,6 +9,7 @@ import {
   atomicWrite,
   same,
   digest,
+  privateRoot,
 } from "./files.mjs";
 import { packPluginDirectory } from "./bundle.mjs";
 import {
@@ -61,6 +62,7 @@ export async function assertRepositoryReady(root) {
 }
 export async function exportProfile(ctx) {
   await assertRepositoryReady(ctx.root);
+  if (ctx.state) await privateRoot(ctx.state);
   const old = await jsonOrNull(await safeFile(ctx.root, "profile.json"));
   const loaded = old ? await loadProfile(ctx.root) : null;
   const rows = (await ctx.adapter.list()).filter(
