@@ -1,4 +1,6 @@
 import { readFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { safeFile, relativeName, objectHash, digest } from "./files.mjs";
 
 const ID = /^[a-z][a-z0-9_-]*$/;
@@ -42,10 +44,19 @@ export function validatePlugin(p) {
       SEMVER.test(p.revision),
       "npm revision must be an exact semantic version",
     );
+  } else if (p.source.startsWith("bundle:")) {
+    check(
+      p.source === `bundle:bundles/${p.id}.tar.gz`,
+      "Bundle source must be bundle:bundles/<id>.tar.gz",
+    );
+    check(
+      SHA.test(p.revision),
+      "Bundle revision must be a complete 64-character SHA256",
+    );
   } else {
     check(
       p.source.startsWith("git:"),
-      "Only portable npm: and git: sources are supported",
+      "Only portable npm:, git: and bundle: sources are supported",
     );
     const u = new URL(p.source.slice(4));
     check(
@@ -273,6 +284,23 @@ export function isPortablePlugin(row) {
 }
 export function snapshotPlugin(row) {
   const i = row.installation;
+  if (i?.identity?.kind === "directory" && row.path) {
+    const metaFile = path.join(row.path, ".paseo-sync-bundle.json");
+    if (existsSync(metaFile)) {
+      try {
+        const meta = JSON.parse(readFileSync(metaFile, "utf8"));
+        if (meta.source && meta.source.startsWith("bundle:") && meta.revision) {
+          const p = {
+            id: row.id,
+            source: meta.source,
+            revision: meta.revision,
+            enabled: row.enabled,
+          };
+          return validatePlugin(p);
+        }
+      } catch {}
+    }
+  }
   check(
     i?.identity && i.currentRevision,
     `Cannot export untracked plugin: ${row.id}`,
@@ -283,7 +311,9 @@ export function snapshotPlugin(row) {
     source:
       identity.kind === "npm"
         ? `npm:${identity.packageName}`
-        : `git:${identity.remote}`,
+        : identity.kind === "bundle"
+          ? identity.source
+          : `git:${identity.remote}`,
     revision: i.currentRevision,
     enabled: row.enabled,
   };
@@ -326,10 +356,24 @@ export async function loadProfile(root) {
       ),
     });
   }
+  const bundles = [];
+  for (const plugin of manifest.plugins) {
+    if (plugin.source.startsWith("bundle:")) {
+      const bundleRel = plugin.source.slice(7);
+      const bundlePath = await safeFile(root, bundleRel);
+      const raw = await readFile(bundlePath);
+      const hash = digest(raw);
+      check(hash === plugin.revision, `Bundle hash mismatch: ${plugin.id}`);
+      bundles.push({ plugin: plugin.id, file: bundleRel, hash });
+    }
+  }
+  const hashPayload = { manifest, settings, patches };
+  if (bundles.length > 0) hashPayload.bundles = bundles;
   return {
     manifest,
     settings,
     patches,
-    hash: objectHash({ manifest, settings, patches }),
+    bundles,
+    hash: objectHash(hashPayload),
   };
 }

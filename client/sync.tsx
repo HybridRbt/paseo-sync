@@ -1112,8 +1112,8 @@ export function ResultSummary({
     changes?: {
       plugin: string;
       actions: string[];
-      from?: { revision: string } | null;
-      to?: { revision: string };
+      from?: { revision: string; source?: string } | null;
+      to?: { revision: string; source?: string };
       settings?: { document: string; before: unknown; after: unknown }[];
     }[];
     pushUrl?: string;
@@ -1336,11 +1336,18 @@ export function ResultSummary({
               </Text>
             </View>
           ) : (
-            <Text key={s.plugin} style={text}>
-              {t("跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。", {
-                plugin: s.plugin,
-              })}
-            </Text>
+            <View key={s.plugin} style={{ gap: 4 }}>
+              <Text selectable style={text}>
+                {t("跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。", {
+                  plugin: s.plugin,
+                })}
+              </Text>
+              <Text selectable style={text}>
+                {s.published
+                  ? t("配置仓库沿用该插件已发布的版本。")
+                  : t("该插件尚未发布过，本次不出现在配置中。")}
+              </Text>
+            </View>
           )
         ) : s.reason === "registry-version-transition" ? (
           <Text key={s.plugin} style={text}>
@@ -1360,33 +1367,48 @@ export function ResultSummary({
       {r.changes?.length === 0 ? (
         <Text style={text}>{t("配置一致，无需修改。")}</Text>
       ) : null}
-      {r.changes?.map((c) => (
-        <View key={c.plugin} style={{ gap: 4 }}>
-          <Text style={text}>
-            {c.plugin}：{c.from?.revision ?? t("未安装")} → {c.to?.revision} ·{" "}
-            {c.actions
-              .map(
-                (a) =>
-                  ({
-                    install: "安装",
-                    update: "切换版本",
-                    enable: "启用",
-                    disable: "停用",
-                    reload: "重载",
-                    patch: "应用补丁",
-                  })[a] ?? "更新设置",
-              )
-              .map((a) => t(a))
-              .join(", ")}
-          </Text>
-          {c.settings?.map((s) => (
-            <Text selectable key={s.document} style={text}>
-              {s.document}：{JSON.stringify(s.before)} →{" "}
-              {JSON.stringify(s.after)}
+      {r.changes?.map((c) => {
+        const isBundle =
+          c.to?.source?.startsWith("bundle:") ||
+          c.from?.source?.startsWith("bundle:");
+        const fromRev = c.from?.revision
+          ? isBundle && c.from.revision.length === 64
+            ? c.from.revision.slice(0, 7)
+            : c.from.revision
+          : t("未安装");
+        const toRev =
+          isBundle && c.to?.revision && c.to.revision.length === 64
+            ? c.to.revision.slice(0, 7)
+            : c.to?.revision;
+        return (
+          <View key={c.plugin} style={{ gap: 4 }}>
+            <Text style={text}>
+              {c.plugin}
+              {isBundle ? ` [${t("离线归档")}]` : ""}：{fromRev} → {toRev} ·{" "}
+              {c.actions
+                .map(
+                  (a) =>
+                    ({
+                      install: "安装",
+                      update: "切换版本",
+                      enable: "启用",
+                      disable: "停用",
+                      reload: "重载",
+                      patch: "应用补丁",
+                    })[a] ?? "更新设置",
+                )
+                .map((a) => t(a))
+                .join(", ")}
             </Text>
-          ))}
-        </View>
-      ))}
+            {c.settings?.map((s) => (
+              <Text selectable key={s.document} style={text}>
+                {s.document}：{JSON.stringify(s.before)} →{" "}
+                {JSON.stringify(s.after)}
+              </Text>
+            ))}
+          </View>
+        );
+      })}
       {r.files?.length === 0 ? (
         <Text style={text}>
           {t("导出内容没有变化；确认发布可推送尚未推送的提交。")}
@@ -1395,14 +1417,22 @@ export function ResultSummary({
       {r.files?.map((f) => (
         <View key={f.path} style={{ gap: 4 }}>
           <Text style={text}>{f.path}</Text>
-          <Text selectable style={text}>
-            {t("修改前：")}
-            {f.before ?? t("文件不存在")}
-          </Text>
-          <Text selectable style={text}>
-            {t("修改后：")}
-            {f.after}
-          </Text>
+          {f.path.endsWith(".tar.gz") ? (
+            <Text style={text}>
+              {f.before ? t("更新离线归档包") : t("新增离线归档包")}
+            </Text>
+          ) : (
+            <>
+              <Text selectable style={text}>
+                {t("修改前：")}
+                {f.before ?? t("文件不存在")}
+              </Text>
+              <Text selectable style={text}>
+                {t("修改后：")}
+                {f.after}
+              </Text>
+            </>
+          )}
         </View>
       ))}
       {r.missing ? (

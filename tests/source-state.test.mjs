@@ -113,6 +113,138 @@ test("installBuildFiles entries match when the plugin lives in a repository subd
   assert.deepEqual(state.changed, []);
 });
 
+test("installed bundle directory sourceState detects file edits, additions, and deletions", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "paseo-bundle-source-state-"));
+  try {
+    await writeFile(path.join(dir, "paseo-plugin.json"), JSON.stringify({ id: "bundle-tool" }));
+    await writeFile(path.join(dir, "index.js"), "console.log('v1');\n");
+    const { fingerprintDirectory, BUNDLE_MARKER } = await import("../server/core/bundle.mjs");
+    const initialFiles = await fingerprintDirectory(dir);
+    const revision = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    await writeFile(
+      path.join(dir, BUNDLE_MARKER),
+      JSON.stringify({
+        source: "bundle:bundles/bundle-tool.tar.gz",
+        revision,
+        files: initialFiles,
+      }),
+    );
+    const row = {
+      id: "bundle-tool",
+      path: dir,
+      installation: {
+        identity: { kind: "directory" },
+      },
+    };
+    // 1. Clean
+    let state = await sourceState(row, { patches: [] });
+    assert.equal(state.clean, true);
+    assert.equal(state.head, revision);
+    assert.deepEqual(state.changed, []);
+
+    // 2. Modified file
+    await writeFile(path.join(dir, "index.js"), "console.log('edited');\n");
+    state = await sourceState(row, { patches: [] });
+    assert.equal(state.clean, false);
+    assert.deepEqual(state.changed, ["index.js"]);
+
+    // Revert index.js
+    await writeFile(path.join(dir, "index.js"), "console.log('v1');\n");
+
+    // 3. Added file
+    await writeFile(path.join(dir, "extra.js"), "console.log('new');\n");
+    state = await sourceState(row, { patches: [] });
+    assert.equal(state.clean, false);
+    assert.deepEqual(state.changed, ["extra.js"]);
+
+    // Remove added file
+    const { rm } = await import("node:fs/promises");
+    await rm(path.join(dir, "extra.js"));
+
+    // 4. Deleted file
+    await rm(path.join(dir, "index.js"));
+    state = await sourceState(row, { patches: [] });
+    assert.equal(state.clean, false);
+    assert.deepEqual(state.changed, ["index.js"]);
+  } finally {
+    const { rm } = await import("node:fs/promises");
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("installed bundle directory sourceState recognizes recorded patches and detects subsequent edits", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "paseo-bundle-patch-source-state-"));
+  try {
+    await writeFile(path.join(dir, "paseo-plugin.json"), JSON.stringify({ id: "bundle-tool" }));
+    await writeFile(path.join(dir, "index.js"), "console.log('original');\n");
+    const { fingerprintDirectory, BUNDLE_MARKER } = await import("../server/core/bundle.mjs");
+    const { digest } = await import("../server/core/files.mjs");
+    const initialFiles = await fingerprintDirectory(dir);
+    const revision = "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";
+    await writeFile(
+      path.join(dir, BUNDLE_MARKER),
+      JSON.stringify({
+        source: "bundle:bundles/bundle-tool.tar.gz",
+        revision,
+        files: initialFiles,
+      }),
+    );
+    const row = {
+      id: "bundle-tool",
+      path: dir,
+      installation: {
+        identity: { kind: "directory" },
+      },
+    };
+
+    // Apply a patch to index.js
+    const patchedContent = "console.log('patched');\n";
+    await writeFile(path.join(dir, "index.js"), patchedContent);
+    const patchAfterSha256 = digest(Buffer.from(patchedContent));
+
+    const profile = {
+      patches: [
+        {
+          plugin: "bundle-tool",
+          data: {
+            files: [
+              {
+                path: "index.js",
+                afterSha256: patchAfterSha256,
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    // 1. Clean when file matches recorded patch
+    let state = await sourceState(row, profile);
+    assert.equal(state.clean, true);
+    assert.deepEqual(state.changed, []);
+
+    // 2. Dirty if patched file is further modified
+    await writeFile(path.join(dir, "index.js"), "console.log('tampered');\n");
+    state = await sourceState(row, profile);
+    assert.equal(state.clean, false);
+    assert.deepEqual(state.changed, ["index.js"]);
+
+    // Revert to patch content -> clean again
+    await writeFile(path.join(dir, "index.js"), patchedContent);
+    state = await sourceState(row, profile);
+    assert.equal(state.clean, true);
+
+    // 3. Dirty if an unpatched file is added or changed
+    await writeFile(path.join(dir, "extra.js"), "new file");
+    state = await sourceState(row, profile);
+    assert.equal(state.clean, false);
+    assert.deepEqual(state.changed, ["extra.js"]);
+  } finally {
+    const { rm } = await import("node:fs/promises");
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("the patch allowance survives a non-canonical (symlinked) checkout path", async () => {
   // A symlinked daemon home leaves row.path with a symlink prefix while
   // git canonicalizes its toplevel; keyed off the raw path the allowance
