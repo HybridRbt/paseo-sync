@@ -21,6 +21,7 @@ import {
   renderDriftDisclosure,
   formatConflict,
 } from "./i18n.mjs";
+import { copyTextToClipboard } from "./clipboard.mjs";
 import { mergeDiscovery, editCheckout } from "../shared/onboarding.mjs";
 import {
   actionGate,
@@ -914,12 +915,12 @@ export function CheckoutShortcuts({
     target: "terminal" | "fileManager",
   ) => Promise<{ status: "opened" | "unsupported" | "failed"; error?: string }>;
 }) {
-  const [opening, setOpening] = useState<"terminal" | "fileManager" | null>(
-    null,
-  );
+  const [opening, setOpening] = useState<
+    "terminal" | "fileManager" | "copy" | null
+  >(null);
   const [status, setStatus] = useState<{
-    type: "terminal" | "fileManager";
-    status: "opened" | "unsupported" | "failed";
+    type: "terminal" | "fileManager" | "copy";
+    status: "opened" | "unsupported" | "failed" | "copied";
     error?: string;
   } | null>(null);
 
@@ -933,6 +934,26 @@ export function CheckoutShortcuts({
     } catch (e) {
       setStatus({
         type: target,
+        status: "failed",
+        error: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setOpening(null);
+    }
+  }
+
+  // Client-side copy only: unlike the open buttons it does not depend on the
+  // daemon host's desktop environment, so it stays usable on headless hosts.
+  async function handleCopyPath() {
+    if (opening) return;
+    setOpening("copy");
+    setStatus(null);
+    try {
+      await copyTextToClipboard(checkout);
+      setStatus({ type: "copy", status: "copied" });
+    } catch (e) {
+      setStatus({
+        type: "copy",
         status: "failed",
         error: e instanceof Error ? e.message : String(e),
       });
@@ -1001,6 +1022,23 @@ export function CheckoutShortcuts({
             {t("在文件管理器中打开")}
           </Text>
         </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={t("复制 {plugin} 源码目录路径", { plugin })}
+          disabled={Boolean(opening)}
+          style={{
+            paddingVertical: 4,
+            paddingHorizontal: 8,
+            borderRadius: 4,
+            borderWidth: 1,
+            borderColor: borderCol,
+            backgroundColor: bgCol,
+            opacity: opening === "copy" ? 0.6 : 1,
+          }}
+          onPress={() => void handleCopyPath()}
+        >
+          <Text style={{ fontSize: 12, color: fgCol }}>{t("复制路径")}</Text>
+        </Pressable>
       </View>
       {status ? (
         <Text
@@ -1009,22 +1047,28 @@ export function CheckoutShortcuts({
             fontSize: 12,
             paddingLeft: 4,
             color:
-              status.status === "opened"
+              status.status === "opened" || status.status === "copied"
                 ? successCol
                 : status.status === "failed"
                   ? dangerCol
                   : mutedCol,
           }}
         >
-          {status.status === "opened"
-            ? status.type === "terminal"
-              ? t("已打开终端")
-              : t("已在文件管理器中打开")
-            : status.status === "unsupported"
-              ? t("当前平台不支持该快捷方式。")
-              : t("打开失败：{error}", {
-                  error: status.error || t("未知错误"),
-                })}
+          {status.status === "copied"
+            ? t("已复制路径")
+            : status.status === "opened"
+              ? status.type === "terminal"
+                ? t("已打开终端")
+                : t("已在文件管理器中打开")
+              : status.status === "unsupported"
+                ? t("当前平台不支持该快捷方式。")
+                : status.type === "copy"
+                  ? t("复制失败：{error}，路径已显示在上方，可手动选中复制。", {
+                      error: status.error || t("未知错误"),
+                    })
+                  : t("打开失败：{error}", {
+                      error: status.error || t("未知错误"),
+                    })}
         </Text>
       ) : null}
     </View>
