@@ -96,6 +96,8 @@ function turned(a, b) {
 // A succeeded job proves part of the flow finished. Successes other than
 // inspect imply the repository was connected; apply also implies the Cafe
 // stage was reviewed, because the apply preview blocks on pending conflicts.
+// Publishing only implies the profile export succeeded; it leaves any pending
+// Cafe exclusion step untouched so managed plugins are not auto-updated.
 export function progressFromJob(progress, kind, checkout) {
   if (typeof checkout !== "string") return progress;
   const base =
@@ -104,9 +106,12 @@ export function progressFromJob(progress, kind, checkout) {
   if (kind === "inspect") next.inspected = true;
   else next.prepared = true;
   if (kind === "cafe") next.cafe = true;
-  if (kind === "apply" || kind === "publish") {
+  if (kind === "apply") {
     next.applied = true;
     next.cafe = true;
+  }
+  if (kind === "publish") {
+    next.applied = true;
   }
   return turned(progress, next) ? next : progress;
 }

@@ -136,9 +136,19 @@ test("a payable-free job history updates progress with implications and checkout
   assert.deepEqual(progressFromJob(base, "publish", "/profile"), {
     ...base,
     applied: true,
-    cafe: true,
+    cafe: false,
     prepared: true,
   });
+  // If Cafe auto-update exclusions were already reviewed/applied, publishing preserves that.
+  assert.deepEqual(
+    progressFromJob({ ...base, cafe: true }, "publish", "/profile"),
+    {
+      ...base,
+      applied: true,
+      cafe: true,
+      prepared: true,
+    },
+  );
   // Switching checkouts starts a fresh progress for that checkout.
   assert.deepEqual(progressFromJob(base, "apply", "/other"), {
     checkout: "/other",
