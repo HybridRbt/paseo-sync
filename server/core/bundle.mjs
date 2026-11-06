@@ -461,12 +461,15 @@ export async function packPluginDirectory(sourceDir, options = {}) {
 
   for (const relPath of relFiles) {
     const fullPath = path.join(sourceDir, relPath);
+    const { size, mode } = await stat(fullPath);
+    if (totalSize + size > maxSizeBytes) {
+      throw new Error(`Bundle size exceeds limit (${maxSizeBytes} bytes)`);
+    }
     const content = await readFile(fullPath);
     totalSize += content.length;
     if (totalSize > maxSizeBytes) {
       throw new Error(`Bundle size exceeds limit (${maxSizeBytes} bytes)`);
     }
-    const { mode } = await stat(fullPath);
     entries.push({ name: relPath, content, mode });
     files[relPath] = sha256(content);
   }

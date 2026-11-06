@@ -1878,3 +1878,66 @@ test("protects unmarked development directory inside local-plugins from destruct
   );
   assert.equal(await readFile(path.join(localDevDir, ".env"), "utf8"), "SECRET_TOKEN=keep-me");
 });
+
+test("staged bundle extraction preserves existing installation and allows rollback when archive extraction fails", async (t) => {
+  const f = await fixture(t);
+  const bundleSourceDir = path.join(f.home, "stage-tool-src");
+  await mkdir(bundleSourceDir, { recursive: true });
+  await writeFile(
+    path.join(bundleSourceDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "stage-tool" }),
+  );
+  await writeFile(path.join(bundleSourceDir, "index.js"), "v1-working;");
+  const packedV1 = await packPluginDirectory(bundleSourceDir);
+  const bundleFile = path.join(f.root, "bundles/stage-tool.tar.gz");
+  await mkdir(path.dirname(bundleFile), { recursive: true });
+  await writeFile(bundleFile, packedV1.buffer);
+
+  f.manifest.plugins.push({
+    id: "stage-tool",
+    source: "bundle:bundles/stage-tool.tar.gz",
+    revision: packedV1.sha256,
+    enabled: true,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  // Install V1
+  const plan1 = await buildPlan(f.ctx);
+  await applyPlan(f.ctx, plan1.approval);
+  const installedDir = path.join(f.home, "local-plugins/stage-tool");
+  assert.equal(await readFile(path.join(installedDir, "index.js"), "utf8"), "v1-working;");
+
+  // Replace bundle archive with invalid gzip bytes whose sha256 matches target.revision
+  const { createHash } = await import("node:crypto");
+  const corruptBytes = Buffer.from("not-a-valid-gzip-archive");
+  const corruptSha = createHash("sha256").update(corruptBytes).digest("hex");
+  await writeFile(bundleFile, corruptBytes);
+  f.manifest.plugins.find((p) => p.id === "stage-tool").revision = corruptSha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  const plan2 = await buildPlan(f.ctx);
+  let failedBackupId = null;
+  await assert.rejects(
+    async () => {
+      await applyPlan(f.ctx, plan2.approval);
+    },
+    (err) => {
+      failedBackupId = err.backupId;
+      return Boolean(failedBackupId);
+    },
+  );
+
+  // Working V1 installation and its bundle marker must remain intact
+  assert.equal(await readFile(path.join(installedDir, "index.js"), "utf8"), "v1-working;");
+  const marker = JSON.parse(
+    await readFile(path.join(installedDir, ".paseo-sync-bundle.json"), "utf8"),
+  );
+  assert.equal(marker.revision, packedV1.sha256);
+
+  // Rollback via restorePlan + restore must succeed cleanly
+  const restorePreview = await restorePlan(f.ctx, failedBackupId);
+  assert.deepEqual(restorePreview.conflicts, []);
+  await restore(f.ctx, failedBackupId, restorePreview.approval);
+  assert.equal(await readFile(path.join(installedDir, "index.js"), "utf8"), "v1-working;");
+  assert.equal((await f.adapter.list()).find((p) => p.id === "stage-tool").enabled, true);
+});

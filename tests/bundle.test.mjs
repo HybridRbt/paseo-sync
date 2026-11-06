@@ -293,3 +293,30 @@ test("allow filenames with consecutive dots while rejecting parent-directory tra
     await rm(dst, { recursive: true, force: true });
   }
 });
+
+test("packPluginDirectory checks file size via stat before allocating buffer via readFile", async () => {
+  const src = await mkdtemp(path.join(tmpdir(), "bundle-stat-limit-"));
+  const { truncate, chmod } = await import("node:fs/promises");
+  try {
+    await writeFile(path.join(src, "paseo-plugin.json"), JSON.stringify({ id: "stat-limit" }));
+    const hugeFile = path.join(src, "huge.bin");
+    await writeFile(hugeFile, "");
+    await truncate(hugeFile, 30 * 1024 * 1024); // 30 MiB > 25 MiB limit
+    if (process.platform !== "win32") {
+      // Remove read permission so readFile would throw EACCES if called before stat check
+      await chmod(hugeFile, 0o000);
+    }
+
+    await assert.rejects(
+      async () => packPluginDirectory(src),
+      /Bundle size exceeds limit/,
+    );
+  } finally {
+    if (process.platform !== "win32") {
+      try {
+        await chmod(path.join(src, "huge.bin"), 0o644);
+      } catch {}
+    }
+    await rm(src, { recursive: true, force: true });
+  }
+});

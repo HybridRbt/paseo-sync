@@ -1,7 +1,7 @@
 import { sourceState } from "./source-state.mjs";
 import { acquireOperation } from "./lock.mjs";
 import { randomUUID } from "node:crypto";
-import { readFile, mkdir, rm, lstat, writeFile } from "node:fs/promises";
+import { readFile, mkdir, rm, lstat, writeFile, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import {
@@ -247,21 +247,54 @@ export async function installOrUpdateBundlePlugin(
     );
   }
 
-  await rm(destDir, { recursive: true, force: true });
-  const unpacked = await unpackBundle(raw, destDir);
-  await writeFile(
-    path.join(destDir, BUNDLE_MARKER),
-    JSON.stringify(
-      {
-        source: target.source,
-        revision: target.revision,
-        files: unpacked.files,
-      },
-      null,
-      2,
-    ),
-    "utf8",
+  await mkdir(path.dirname(destDir), { recursive: true });
+  const stageDir = path.join(
+    path.dirname(destDir),
+    `.${path.basename(destDir)}.stage-${randomUUID()}`,
   );
+  try {
+    const unpacked = await unpackBundle(raw, stageDir);
+    await writeFile(
+      path.join(stageDir, BUNDLE_MARKER),
+      JSON.stringify(
+        {
+          source: target.source,
+          revision: target.revision,
+          files: unpacked.files,
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+  } catch (err) {
+    await rm(stageDir, { recursive: true, force: true });
+    throw err;
+  }
+
+  const backupDir = existsSync(destDir)
+    ? path.join(
+        path.dirname(destDir),
+        `.${path.basename(destDir)}.bak-${randomUUID()}`,
+      )
+    : null;
+  if (backupDir) {
+    await rename(destDir, backupDir);
+  }
+  try {
+    await rename(stageDir, destDir);
+  } catch (err) {
+    await rm(stageDir, { recursive: true, force: true });
+    if (backupDir && existsSync(backupDir) && !existsSync(destDir)) {
+      try {
+        await rename(backupDir, destDir);
+      } catch {}
+    }
+    throw err;
+  }
+  if (backupDir) {
+    await rm(backupDir, { recursive: true, force: true });
+  }
   await cacheBundleArchive(ctx, target.id, target.revision, raw);
 
   if (!isUpdate) {
