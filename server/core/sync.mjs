@@ -26,7 +26,7 @@ import {
 import {
   unpackBundle,
   packPluginDirectory,
-  parseTarEntries,
+  attachPatchOriginalBytes,
   BUNDLE_MARKER,
   resolveBundleArchive,
 } from "./bundle.mjs";
@@ -175,25 +175,7 @@ async function resolvePluginDescriptor(
           ?.filter((b) => b.plugin === row.id)
           .flatMap((b) => b.data?.files ?? []) ?? []
       ).map((f) => ({ ...f }));
-      if (ctx && patchSpecs.length > 0) {
-        try {
-          const raw = await resolveBundleArchive(ctx, target);
-          if (raw) {
-            const tarEntries = new Map(
-              parseTarEntries(zlib.gunzipSync(raw)).map((e) => [
-                e.name.replace(/\\/g, "/"),
-                e.content,
-              ]),
-            );
-            for (const spec of patchSpecs) {
-              const orig = tarEntries.get(spec.path?.replace(/\\/g, "/"));
-              if (orig && digest(orig) === spec.beforeSha256) {
-                spec.beforeBytes = orig;
-              }
-            }
-          }
-        } catch {}
-      }
+      await attachPatchOriginalBytes(ctx, target, patchSpecs);
       const packed = await packPluginDirectory(row.path, {
         patches: patchSpecs,
       });

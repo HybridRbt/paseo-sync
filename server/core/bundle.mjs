@@ -854,7 +854,10 @@ export async function packPluginDirectory(sourceDir, options = {}) {
   if (Array.isArray(options.patches)) {
     for (const spec of options.patches) {
       if (spec && typeof spec.path === "string") {
-        patchByPath.set(spec.path.replace(/\\/g, "/"), spec);
+        patchByPath.set(
+          spec.path.replace(/\\/g, "/").replace(/^(\.\/)+/, ""),
+          spec,
+        );
       }
     }
   }
@@ -1024,4 +1027,36 @@ export async function resolveBundleArchive(
     } catch {}
   }
   return null;
+}
+
+/**
+ * Resolves the matching base bundle archive for `target` and attaches `beforeBytes`
+ * to any patch specification whose `beforeSha256` matches the entry in that archive.
+ * This allows non-invertible patches (such as deletion patches with `replace: ""`)
+ * to be reversed accurately when synthesizing or exporting bundle archives.
+ */
+export async function attachPatchOriginalBytes(ctx, target, patchSpecs) {
+  if (!ctx || !target || !Array.isArray(patchSpecs) || patchSpecs.length === 0) {
+    return patchSpecs;
+  }
+  try {
+    const raw = await resolveBundleArchive(ctx, target);
+    if (raw) {
+      const tarEntries = new Map(
+        parseTarEntries(zlib.gunzipSync(raw)).map((e) => [
+          e.name.replace(/\\/g, "/").replace(/^(\.\/)+/, ""),
+          e.content,
+        ]),
+      );
+      for (const spec of patchSpecs) {
+        if (!spec || typeof spec.path !== "string") continue;
+        const normPath = spec.path.replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+        const orig = tarEntries.get(normPath);
+        if (orig && sha256(orig) === spec.beforeSha256) {
+          spec.beforeBytes = orig;
+        }
+      }
+    }
+  } catch {}
+  return patchSpecs;
 }

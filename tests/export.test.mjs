@@ -582,3 +582,109 @@ test("export includes and copies archives for already-installed bundle plugins i
   assert.equal(loaded.bundles.length, 1);
   assert.equal(loaded.bundles[0].plugin, "bundle-test");
 });
+
+test("export unmarked directory plugin with applied deletion patch recovers original bytes and exports matching unpatched revision", async () => {
+  const f = await fixture();
+  const pluginDir = path.join(f.home, "local-dev-plugin");
+  await mkdir(pluginDir, { recursive: true });
+  await writeFile(
+    path.join(pluginDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "dev-plugin", name: "Dev Plugin" }),
+  );
+
+  const unpatchedCode = "debug();\nexport const main = 1;\n";
+  const patchedCode = "export const main = 1;\n";
+
+  // Initially create unpatched index.js and pack base bundle
+  await writeFile(path.join(pluginDir, "index.js"), unpatchedCode);
+  const { packPluginDirectory } = await import("../server/core/bundle.mjs");
+  const { digest } = await import("../server/core/files.mjs");
+  const { loadProfile } = await import("../server/core/profile.mjs");
+  const packed = await packPluginDirectory(pluginDir);
+
+  // Setup repository with base bundle, deletion patch (replace: ""), and profile.json
+  await mkdir(path.join(f.root, "bundles"), { recursive: true });
+  await mkdir(path.join(f.root, "patches"), { recursive: true });
+  await writeFile(path.join(f.root, "bundles/dev-plugin.tar.gz"), packed.buffer);
+  await writeFile(
+    path.join(f.root, "patches/dev-plugin.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        plugin: "dev-plugin",
+        revision: packed.sha256,
+        files: [
+          {
+            path: "index.js",
+            beforeSha256: digest(unpatchedCode),
+            afterSha256: digest(patchedCode),
+            find: "debug();\n",
+            replace: "",
+            count: 1,
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  await writeFile(
+    path.join(f.root, "profile.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        plugins: [
+          {
+            id: "dev-plugin",
+            source: "bundle:bundles/dev-plugin.tar.gz",
+            revision: packed.sha256,
+            enabled: true,
+          },
+        ],
+        settings: [],
+        patches: [
+          {
+            plugin: "dev-plugin",
+            file: "patches/dev-plugin.json",
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+
+  // Apply deletion patch locally to the unmarked directory checkout
+  await writeFile(path.join(pluginDir, "index.js"), patchedCode);
+
+  const ctx = {
+    root: f.root,
+    home: f.home,
+    state: f.state,
+    adapter: {
+      list: async () => [
+        {
+          id: "dev-plugin",
+          enabled: true,
+          status: "running",
+          path: pluginDir,
+          installation: {
+            identity: { kind: "directory", path: pluginDir },
+          },
+        },
+      ],
+    },
+  };
+
+  // exportProfile should successfully recover original bytes from bundles/dev-plugin.tar.gz,
+  // restore unpatched index.js in memory, compute packed.sha256 matching the unpatched revision,
+  // and pass validatePatch without throwing "Patch does not match plugin revision".
+  const res = await exportProfile(ctx);
+  assert.equal(res.exported, true);
+  assert.equal(res.patches, 1);
+
+  const loaded = await loadProfile(f.root);
+  const plugin = loaded.manifest.plugins.find((p) => p.id === "dev-plugin");
+  assert.ok(plugin);
+  assert.equal(plugin.revision, packed.sha256);
+});

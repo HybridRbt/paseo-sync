@@ -12,7 +12,11 @@ import {
   digest,
   privateRoot,
 } from "./files.mjs";
-import { packPluginDirectory, resolveBundleArchive } from "./bundle.mjs";
+import {
+  packPluginDirectory,
+  resolveBundleArchive,
+  attachPatchOriginalBytes,
+} from "./bundle.mjs";
 import {
   isPortablePlugin,
   snapshotPlugin,
@@ -94,10 +98,25 @@ export async function exportProfile(ctx) {
   const bundled = new Map();
   for (const row of rows) {
     if (row.installation?.identity?.kind === "directory" && row.path) {
-      const patchSpecs =
+      const patchSpecs = (
         loaded?.patches
           ?.filter((b) => b.plugin === row.id)
-          .flatMap((b) => b.data?.files ?? []) ?? [];
+          .flatMap((b) => b.data?.files ?? []) ?? []
+      ).map((f) => ({ ...f }));
+      const existing = loaded?.manifest.plugins.find((p) => p.id === row.id);
+      const target =
+        existing && existing.source?.startsWith("bundle:")
+          ? existing
+          : {
+              id: row.id,
+              source: `bundle:bundles/${row.id}.tar.gz`,
+              revision:
+                existing?.revision ??
+                loaded?.patches.find((b) => b.plugin === row.id)?.data?.revision,
+            };
+      if (patchSpecs.length > 0 && target?.revision) {
+        await attachPatchOriginalBytes(ctx, target, patchSpecs);
+      }
       if (isPortablePlugin(row)) {
         // Installed bundle plugin with a valid marker
         const state = await sourceState(row, loaded ?? { patches: [] });
