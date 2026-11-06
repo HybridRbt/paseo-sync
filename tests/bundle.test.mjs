@@ -320,3 +320,125 @@ test("packPluginDirectory checks file size via stat before allocating buffer via
     await rm(src, { recursive: true, force: true });
   }
 });
+
+test("packPluginDirectory honors nested directory-scoped .npmignore and .gitignore rules across non-Git, Git, and files-allowlist plugins", async () => {
+  const { execFileSync } = await import("node:child_process");
+
+  // 1. Non-Git plugin with nested private/.npmignore
+  const src1 = await mkdtemp(path.join(tmpdir(), "bundle-nested-npm-"));
+  try {
+    await writeFile(path.join(src1, "paseo-plugin.json"), JSON.stringify({ id: "nested-npm" }));
+    await writeFile(path.join(src1, "index.js"), "export default 1;");
+    await mkdir(path.join(src1, "private"), { recursive: true });
+    await writeFile(path.join(src1, "private/.npmignore"), "credentials.json\n");
+    await writeFile(path.join(src1, "private/credentials.json"), JSON.stringify({ token: "secret" }));
+    await writeFile(path.join(src1, "private/helper.js"), "export const ok = true;");
+
+    const packed1 = await packPluginDirectory(src1);
+    assert.equal("private/credentials.json" in packed1.files, false);
+    assert.equal("private/.npmignore" in packed1.files, false);
+    assert.equal("private/helper.js" in packed1.files, true);
+    assert.equal("index.js" in packed1.files, true);
+  } finally {
+    await rm(src1, { recursive: true, force: true });
+  }
+
+  // 2. Git worktree where private/credentials.json is tracked in Git, but excluded by private/.npmignore
+  const src2 = await mkdtemp(path.join(tmpdir(), "bundle-nested-git-npm-"));
+  try {
+    await writeFile(path.join(src2, "paseo-plugin.json"), JSON.stringify({ id: "nested-git-npm" }));
+    await writeFile(path.join(src2, "index.js"), "export default 2;");
+    await mkdir(path.join(src2, "private"), { recursive: true });
+    await writeFile(path.join(src2, "private/.npmignore"), "credentials.json\n");
+    await writeFile(path.join(src2, "private/credentials.json"), JSON.stringify({ token: "tracked-secret" }));
+    await writeFile(path.join(src2, "private/helper.js"), "export const ok = 2;");
+
+    const git = (...args) =>
+      execFileSync("git", ["-c", "core.fsmonitor=false", "-C", src2, ...args], {
+        encoding: "utf8",
+      });
+    git("init", "-q");
+    git("config", "user.name", "Test");
+    git("config", "user.email", "test@example.invalid");
+    git("add", ".");
+    git("commit", "-qm", "init");
+
+    const packed2 = await packPluginDirectory(src2);
+    assert.equal("private/credentials.json" in packed2.files, false);
+    assert.equal("private/helper.js" in packed2.files, true);
+    assert.equal("index.js" in packed2.files, true);
+  } finally {
+    await rm(src2, { recursive: true, force: true });
+  }
+
+  // 3. Non-Git plugin with nested sub/.gitignore and package.json files directory allowlist with nested .npmignore
+  const src3 = await mkdtemp(path.join(tmpdir(), "bundle-nested-allowlist-"));
+  try {
+    await writeFile(
+      path.join(src3, "package.json"),
+      JSON.stringify({ name: "nested-allowlist", files: ["lib/"] }),
+    );
+    await writeFile(path.join(src3, "paseo-plugin.json"), JSON.stringify({ id: "nested-allowlist" }));
+    await mkdir(path.join(src3, "lib/private"), { recursive: true });
+    await writeFile(path.join(src3, "lib/index.js"), "export const lib = 1;");
+    await writeFile(path.join(src3, "lib/private/.npmignore"), "credentials.json\n");
+    await writeFile(path.join(src3, "lib/private/credentials.json"), "secret");
+
+    const packed3 = await packPluginDirectory(src3);
+    assert.equal("lib/index.js" in packed3.files, true);
+    assert.equal("lib/private/credentials.json" in packed3.files, false);
+  } finally {
+    await rm(src3, { recursive: true, force: true });
+  }
+});
+
+test("matchPattern and package.json files allowlist preserve brace expansion, character classes, and extglobs", async () => {
+  const { matchPattern } = await import("../server/core/bundle.mjs");
+
+  assert.equal(matchPattern("index.js", "*.{js,ts}"), true);
+  assert.equal(matchPattern("index.ts", "*.{js,ts}"), true);
+  assert.equal(matchPattern("index.css", "*.{js,ts}"), false);
+  assert.equal(matchPattern("src/a/b.mjs", "src/**/*.{js,{cjs,mjs}}"), true);
+  assert.equal(matchPattern("index.js", "*.[jt]s"), true);
+  assert.equal(matchPattern("index.ts", "*.[jt]s"), true);
+  assert.equal(matchPattern("index.d.ts", "index.[!d].ts"), false);
+  assert.equal(matchPattern("index.x.ts", "index.[!d].ts"), true);
+  assert.equal(matchPattern("chunk1.js", "chunk[[:digit:]].js"), true);
+  assert.equal(matchPattern("chunkA.js", "chunk[[:digit:]].js"), false);
+  assert.equal(matchPattern("entry.ts", "*.+(js|ts)"), true);
+  assert.equal(matchPattern("entry.js", "!(*.test).js"), true);
+  assert.equal(matchPattern("entry.test.js", "!(*.test).js"), false);
+
+  const src = await mkdtemp(path.join(tmpdir(), "bundle-braces-src-"));
+  const dst = await mkdtemp(path.join(tmpdir(), "bundle-braces-dst-"));
+  try {
+    await writeFile(
+      path.join(src, "package.json"),
+      JSON.stringify({
+        name: "glob-plugin",
+        files: ["*.{js,ts}", "lib/**/*.[jt]s", "!lib/**/*.test.{js,ts}"],
+      }),
+    );
+    await writeFile(path.join(src, "paseo-plugin.json"), JSON.stringify({ id: "glob-plugin" }));
+    await writeFile(path.join(src, "index.js"), "export const main = true;");
+    await writeFile(path.join(src, "types.ts"), "export type T = string;");
+    await writeFile(path.join(src, "notes.txt"), "excluded note");
+    await mkdir(path.join(src, "lib"), { recursive: true });
+    await writeFile(path.join(src, "lib/helper.js"), "export const h = 1;");
+    await writeFile(path.join(src, "lib/util.ts"), "export const u = 2;");
+    await writeFile(path.join(src, "lib/helper.test.js"), "excluded test");
+
+    const packed = await packPluginDirectory(src);
+    await unpackBundle(packed.buffer, dst);
+
+    assert.equal(await readFile(path.join(dst, "index.js"), "utf8"), "export const main = true;");
+    assert.equal(await readFile(path.join(dst, "types.ts"), "utf8"), "export type T = string;");
+    assert.equal(await readFile(path.join(dst, "lib/helper.js"), "utf8"), "export const h = 1;");
+    assert.equal(await readFile(path.join(dst, "lib/util.ts"), "utf8"), "export const u = 2;");
+    await assert.rejects(async () => readFile(path.join(dst, "notes.txt")));
+    await assert.rejects(async () => readFile(path.join(dst, "lib/helper.test.js")));
+  } finally {
+    await rm(src, { recursive: true, force: true });
+    await rm(dst, { recursive: true, force: true });
+  }
+});

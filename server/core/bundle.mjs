@@ -242,16 +242,282 @@ async function scanFiles(baseDir, currentDir = "", fileList = []) {
   return fileList;
 }
 
+const POSIX_CHAR_CLASSES = {
+  alnum: "A-Za-z0-9",
+  alpha: "A-Za-z",
+  ascii: "\\x00-\\x7F",
+  blank: " \\t",
+  cntrl: "\\x00-\\x1F\\x7F",
+  digit: "0-9",
+  graph: "\\x21-\\x2E\\x30-\\x7E",
+  lower: "a-z",
+  print: "\\x20-\\x2E\\x30-\\x7E",
+  punct: "!\"#$%&'()*+,\\-.:;<=>?@[\\\\\\]^_`{|}~",
+  space: "\\s",
+  upper: "A-Z",
+  word: "A-Za-z0-9_",
+  xdigit: "0-9A-Fa-f",
+};
+
+function findClosingBracket(str, startIdx) {
+  let j = startIdx + 1;
+  if (j < str.length && (str[j] === "!" || str[j] === "^")) j++;
+  if (j < str.length && str[j] === "]") j++;
+  while (j < str.length) {
+    if (str[j] === "/") return -1;
+    if (str[j] === "\\" && j + 1 < str.length) {
+      if (str[j + 1] === "/") return -1;
+      j += 2;
+      continue;
+    }
+    if (str[j] === "[" && str[j + 1] === ":") {
+      const m = /^\[:[a-z]+:\]/.exec(str.slice(j));
+      if (m) {
+        j += m[0].length;
+        continue;
+      }
+    }
+    if (str[j] === "]") return j;
+    j++;
+  }
+  return -1;
+}
+
+function scanCharacterClass(glob, startIdx, strict = false) {
+  const endIdx = findClosingBracket(glob, startIdx);
+  if (endIdx === -1) return null;
+  let j = startIdx + 1;
+  let negated = false;
+  if (j < endIdx && (glob[j] === "!" || glob[j] === "^")) {
+    negated = true;
+    j++;
+  }
+  let body = "";
+  if (j < endIdx && glob[j] === "]") {
+    body += "\\]";
+    j++;
+  }
+  while (j < endIdx) {
+    if (glob[j] === "\\" && j + 1 <= endIdx) {
+      const esc = glob[j + 1];
+      body += "\\]^-[/".includes(esc) ? "\\" + esc : esc;
+      j += 2;
+      continue;
+    }
+    if (glob[j] === "[" && glob[j + 1] === ":") {
+      const m = /^\[:([a-z]+):\]/.exec(glob.slice(j));
+      if (m && POSIX_CHAR_CLASSES[m[1]]) {
+        body += POSIX_CHAR_CLASSES[m[1]];
+        j += m[0].length;
+        continue;
+      }
+    }
+    const ch = glob[j];
+    body += ch === "[" ? "\\[" : ch === "^" ? "\\^" : ch;
+    j++;
+  }
+  if (!body) return null;
+  const regex = negated ? `[^/${body}]` : `(?!\\/)[${body}]`;
+  try {
+    new RegExp(regex);
+    return { endIdx, regex };
+  } catch {
+    if (strict) {
+      throw new Error(`Invalid character class in glob pattern: ${glob}`);
+    }
+    return null;
+  }
+}
+
+function findFirstBrace(str, maxRangeItems = 256) {
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (c === "[") {
+      const closeBracket = findClosingBracket(str, i);
+      if (closeBracket !== -1) {
+        i = closeBracket;
+        continue;
+      }
+    }
+    if (c !== "{") continue;
+
+    let depth = 1;
+    const commas = [];
+    let k = i + 1;
+    for (; k < str.length; k++) {
+      const kc = str[k];
+      if (kc === "\\") {
+        k++;
+        continue;
+      }
+      if (kc === "[") {
+        const cb = findClosingBracket(str, k);
+        if (cb !== -1) {
+          k = cb;
+          continue;
+        }
+      }
+      if (kc === "{") {
+        depth++;
+      } else if (kc === "}") {
+        depth--;
+        if (depth === 0) break;
+      } else if (kc === "," && depth === 1) {
+        commas.push(k);
+      }
+    }
+    if (depth !== 0) continue;
+
+    const inner = str.slice(i + 1, k);
+    if (commas.length > 0) {
+      const parts = [];
+      let last = i + 1;
+      for (const commaIdx of commas) {
+        parts.push(str.slice(last, commaIdx));
+        last = commaIdx + 1;
+      }
+      parts.push(str.slice(last, k));
+      return { openIdx: i, closeIdx: k, parts };
+    }
+
+    const rangeMatch = /^(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?$/.exec(inner);
+    if (rangeMatch) {
+      const start = Number(rangeMatch[1]);
+      const end = Number(rangeMatch[2]);
+      const rawStep = rangeMatch[3] !== undefined ? Math.abs(Number(rangeMatch[3])) : 1;
+      if (rawStep > 0) {
+        const count = Math.floor(Math.abs(end - start) / rawStep) + 1;
+        if (count <= maxRangeItems) {
+          const dir = start <= end ? 1 : -1;
+          const step = rawStep * dir;
+          const padWidth =
+            (rangeMatch[1].startsWith("0") && rangeMatch[1].length > 1) ||
+            (rangeMatch[2].startsWith("0") && rangeMatch[2].length > 1) ||
+            (rangeMatch[1].startsWith("-0") && rangeMatch[1].length > 2) ||
+            (rangeMatch[2].startsWith("-0") && rangeMatch[2].length > 2)
+              ? Math.max(rangeMatch[1].replace(/^-/, "").length, rangeMatch[2].replace(/^-/, "").length)
+              : 0;
+          const parts = [];
+          for (let v = start; dir > 0 ? v <= end : v >= end; v += step) {
+            if (padWidth > 0) {
+              const sign = v < 0 ? "-" : "";
+              parts.push(sign + String(Math.abs(v)).padStart(padWidth, "0"));
+            } else {
+              parts.push(String(v));
+            }
+          }
+          return { openIdx: i, closeIdx: k, parts };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+export function expandBraces(pattern, maxExpansions = 256) {
+  const results = [];
+  const queue = [pattern];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    const match = findFirstBrace(current, maxExpansions);
+    if (!match) {
+      results.push(current);
+      continue;
+    }
+    if (results.length + queue.length + match.parts.length - 1 > maxExpansions) {
+      throw new Error(`Glob brace expansion exceeds limit: ${pattern}`);
+    }
+    const prefix = current.slice(0, match.openIdx);
+    const suffix = current.slice(match.closeIdx + 1);
+    for (const part of match.parts) {
+      queue.push(prefix + part + suffix);
+    }
+  }
+  return results;
+}
+
+function findExtglobGroup(glob, openParenIdx) {
+  let depth = 1;
+  const pipes = [];
+  for (let k = openParenIdx + 1; k < glob.length; k++) {
+    const kc = glob[k];
+    if (kc === "\\") {
+      k++;
+      continue;
+    }
+    if (kc === "[") {
+      const cb = findClosingBracket(glob, k);
+      if (cb !== -1) {
+        k = cb;
+        continue;
+      }
+    }
+    if (kc === "(") {
+      depth++;
+    } else if (kc === ")") {
+      depth--;
+      if (depth === 0) {
+        const parts = [];
+        let last = openParenIdx + 1;
+        for (const pipeIdx of pipes) {
+          parts.push(glob.slice(last, pipeIdx));
+          last = pipeIdx + 1;
+        }
+        parts.push(glob.slice(last, k));
+        return { closeIdx: k, parts };
+      }
+    } else if (kc === "|" && depth === 1) {
+      pipes.push(k);
+    }
+  }
+  return null;
+}
+
 /**
  * Translates one glob into a regex body: `*` and `?` stay within a path
- * segment, a leading or segment-wide `**​/` matches zero or more directories
- * and a trailing `/**` everything below. Each token is translated exactly
- * once, so generated regex text is never rewritten again.
+ * segment, a leading or segment-wide `**​/` matches zero or more directories,
+ * a trailing `/**` everything below, and `[...]` matches segment character
+ * classes. Each token is translated once so generated regex text is never
+ * rewritten again.
  */
-function globToRegex(glob) {
+function globToRegex(glob, options = {}) {
+  const { extglob = false, strict = false } = options;
   let re = "";
   for (let i = 0; i < glob.length; i++) {
     const c = glob[i];
+    if (c === "\\") {
+      if (i + 1 < glob.length) {
+        re += glob[++i].replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+      } else {
+        re += "\\\\";
+      }
+      continue;
+    }
+    if (
+      extglob &&
+      (c === "?" || c === "*" || c === "+" || c === "@" || c === "!") &&
+      glob[i + 1] === "("
+    ) {
+      const group = findExtglobGroup(glob, i + 1);
+      if (group) {
+        const inner = group.parts
+          .map((alt) => globToRegex(alt, options))
+          .join("|");
+        if (c === "!") {
+          const restRegex = globToRegex(glob.slice(group.closeIdx + 1), options);
+          re += `(?:(?!(?:${inner})${restRegex}$)[^/]*)${restRegex}`;
+          return re;
+        }
+        const quant = c === "@" ? "" : c;
+        re += `(?:${inner})${quant}`;
+        i = group.closeIdx;
+        continue;
+      }
+    }
     if (c === "*") {
       if (glob[i + 1] === "*") {
         const segmentStart = i === 0 || glob[i - 1] === "/";
@@ -273,6 +539,14 @@ function globToRegex(glob) {
       re += "[^/]*";
     } else if (c === "?") {
       re += "[^/]";
+    } else if (c === "[") {
+      const cls = scanCharacterClass(glob, i, strict);
+      if (cls) {
+        re += cls.regex;
+        i = cls.endIdx;
+      } else {
+        re += "\\[";
+      }
     } else {
       re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
     }
@@ -280,27 +554,53 @@ function globToRegex(glob) {
   return re;
 }
 
+function isLiteralAllowlistFile(raw) {
+  if (raw.endsWith("/")) return false;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (c === "*" || c === "?" || c === "[" || c === "{") return false;
+    if ((c === "+" || c === "@" || c === "!") && raw[i + 1] === "(") return false;
+  }
+  return true;
+}
+
+function unescapeLiteralPath(raw) {
+  return raw
+    .replace(/^(\.\/)+/, "")
+    .replace(/^\/+/, "")
+    .replace(/\\(.)/g, "$1");
+}
+
 /**
  * npm "files" semantics: a pattern matches a file directly or through any of
  * its parent directories (so "dist" or "dist/" includes everything below it).
+ * Brace expansion, character classes, and extglobs are supported.
  */
 export function matchPattern(p, pat) {
-  let pattern = pat
-    .replace(/\\/g, "/")
-    .replace(/^(\.\/)+/, "")
-    .replace(/^\/+/, "");
-  const dirOnly = pattern.endsWith("/");
-  pattern = pattern.replace(/\/+$/, "");
-  if (!pattern) return false;
-  const re = new RegExp("^" + globToRegex(pattern) + "$");
-  const parts = p.split("/");
-  for (let n = parts.length - (dirOnly ? 1 : 0); n >= 1; n--) {
-    if (re.test(parts.slice(0, n).join("/"))) return true;
+  const normalizedPath = p.replace(/\\/g, "/");
+  const parts = normalizedPath.split("/");
+  for (const expanded of expandBraces(pat)) {
+    let pattern = expanded
+      .replace(/^(\.\/)+/, "")
+      .replace(/^\/+/, "");
+    const dirOnly = pattern.endsWith("/");
+    pattern = pattern.replace(/\/+$/, "");
+    if (!pattern) continue;
+    const re = new RegExp(
+      "^" + globToRegex(pattern, { extglob: true, strict: true }) + "$",
+    );
+    for (let n = parts.length - (dirOnly ? 1 : 0); n >= 1; n--) {
+      if (re.test(parts.slice(0, n).join("/"))) return true;
+    }
   }
   return false;
 }
 
-export function isPkgFileMatch(relPath, patterns) {
+function evaluatePkgFileMatch(relPath, patterns) {
   const normalized = relPath.replace(/\\/g, "/");
   const base = path.basename(normalized);
   if (
@@ -310,19 +610,30 @@ export function isPkgFileMatch(relPath, patterns) {
     /^LICENSE(\..+)?$/i.test(base) ||
     /^LICENCE(\..+)?$/i.test(base)
   ) {
-    return true;
+    return { matched: true, directLiteral: !normalized.includes("/") };
   }
   let matched = false;
+  let directLiteral = false;
   for (const raw of patterns) {
     if (typeof raw !== "string") continue;
     if (raw.startsWith("!")) {
       const pat = raw.slice(1);
-      if (matchPattern(normalized, pat)) return false;
-    } else {
-      if (matchPattern(normalized, raw)) matched = true;
+      if (matchPattern(normalized, pat)) {
+        matched = false;
+        directLiteral = false;
+      }
+    } else if (matchPattern(normalized, raw)) {
+      matched = true;
+      if (isLiteralAllowlistFile(raw) && unescapeLiteralPath(raw) === normalized) {
+        directLiteral = true;
+      }
     }
   }
-  return matched;
+  return { matched, directLiteral };
+}
+
+export function isPkgFileMatch(relPath, patterns) {
+  return evaluatePkgFileMatch(relPath, patterns).matched;
 }
 
 /**
@@ -331,26 +642,29 @@ export function isPkgFileMatch(relPath, patterns) {
 export function parseIgnore(text) {
   const rules = [];
   for (const rawLine of text.split(/\r?\n/)) {
-    let line = rawLine.replace(/\s+$/, "");
+    let line = rawLine.replace(/(?<!\\)\s+$/, "").replace(/\\(\s)$/, "$1");
     if (!line || line.startsWith("#")) continue;
     let negate = false;
     if (line.startsWith("!")) {
       negate = true;
       line = line.slice(1);
-    } else if (line.startsWith("\\")) {
+    } else if (line.startsWith("\\") && (line[1] === "#" || line[1] === "!")) {
       line = line.slice(1);
     }
-    const dirOnly = line.endsWith("/");
-    line = line.replace(/\/+$/, "");
-    // A slash at the start or in the middle anchors the pattern to the root.
-    const anchored = line.includes("/");
-    line = line.replace(/^\/+/, "");
-    if (!line) continue;
-    rules.push({
-      negate,
-      dirOnly,
-      re: new RegExp("^" + (anchored ? "" : "(?:.*/)?") + globToRegex(line) + "$"),
-    });
+    for (const expanded of expandBraces(line)) {
+      let pat = expanded;
+      const dirOnly = pat.endsWith("/");
+      pat = pat.replace(/\/+$/, "");
+      // A slash at the start or in the middle anchors the pattern to its directory.
+      const anchored = pat.includes("/");
+      pat = pat.replace(/^\/+/, "");
+      if (!pat) continue;
+      rules.push({
+        negate,
+        dirOnly,
+        re: new RegExp("^" + (anchored ? "" : "(?:.*/)?") + globToRegex(pat) + "$"),
+      });
+    }
   }
   return rules;
 }
@@ -371,12 +685,72 @@ export function isIgnored(relPath, rules) {
   return false;
 }
 
+function isIgnoreControlFile(relPath) {
+  return /(^|\/)\.(npm|git)ignore$/.test(relPath.replace(/\\/g, "/"));
+}
+
 async function textOrNull(file) {
   try {
     return await readFile(file, "utf8");
   } catch {
     return null;
   }
+}
+
+async function loadDirectoryIgnoreRules(sourceDir, candidates) {
+  const dirs = new Set([""]);
+  for (const relPath of candidates) {
+    const parts = relPath.replace(/\\/g, "/").split("/");
+    for (let i = 1; i < parts.length; i++) {
+      dirs.add(parts.slice(0, i).join("/"));
+    }
+  }
+  const dirRules = new Map();
+  for (const dir of dirs) {
+    const fullDir = dir ? path.join(sourceDir, dir) : sourceDir;
+    const npmignore = await textOrNull(path.join(fullDir, ".npmignore"));
+    if (npmignore !== null) {
+      dirRules.set(dir, { kind: "npmignore", rules: parseIgnore(npmignore) });
+      continue;
+    }
+    const gitignore = await textOrNull(path.join(fullDir, ".gitignore"));
+    if (gitignore !== null) {
+      dirRules.set(dir, { kind: "gitignore", rules: parseIgnore(gitignore) });
+    }
+  }
+  return dirRules;
+}
+
+function hasAncestorNpmignore(relPath, dirRules) {
+  if (dirRules.get("")?.kind === "npmignore") return true;
+  const parts = relPath.replace(/\\/g, "/").split("/");
+  for (let i = 1; i < parts.length; i++) {
+    if (dirRules.get(parts.slice(0, i).join("/"))?.kind === "npmignore") {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isTreeIgnored(relPath, dirRules, startDepth = 0) {
+  const parts = relPath.replace(/\\/g, "/").split("/");
+  for (let n = Math.max(1, startDepth + 1); n <= parts.length; n++) {
+    const isDir = n < parts.length;
+    let ignored = false;
+    for (let m = startDepth; m < n; m++) {
+      const dir = m === 0 ? "" : parts.slice(0, m).join("/");
+      const entry = dirRules.get(dir);
+      if (!entry) continue;
+      const relSub = parts.slice(m, n).join("/");
+      for (const rule of entry.rules) {
+        if (rule.dirOnly && !isDir) continue;
+        if (rule.re.test(relSub)) ignored = !rule.negate;
+      }
+    }
+    // A file below an ignored directory cannot be re-included.
+    if (ignored) return true;
+  }
+  return false;
 }
 
 /**
@@ -404,13 +778,18 @@ async function gitPublishable(sourceDir) {
 }
 
 /**
- * Packaging policy. Secrets are always excluded. A nonempty package.json
- * "files" allowlist selects the published files; without one, an absent
- * allowlist never means "publish the whole checkout": .npmignore applies
- * when present, otherwise Git's ignore rules.
+ * Packaging policy. Secrets and ignore control files are always excluded.
+ * A nonempty package.json "files" allowlist selects the published files while
+ * still honoring nested subdirectory ignore files below directory/glob matches;
+ * without one, directory-scoped .npmignore / .gitignore rules and Git's
+ * worktree exclude rules apply throughout the scanned tree.
  */
 export async function selectBundleFiles(sourceDir, relFiles) {
-  const candidates = relFiles.filter((f) => !isSecretPath(f));
+  const candidates = relFiles.filter(
+    (f) => !isSecretPath(f) && !isIgnoreControlFile(f),
+  );
+  const dirRules = await loadDirectoryIgnoreRules(sourceDir, candidates);
+
   let pkgFiles = null;
   try {
     const pkg = JSON.parse(
@@ -420,20 +799,28 @@ export async function selectBundleFiles(sourceDir, relFiles) {
       pkgFiles = pkg.files;
     }
   } catch {}
-  if (pkgFiles) return candidates.filter((f) => isPkgFileMatch(f, pkgFiles));
-  const npmignore = await textOrNull(path.join(sourceDir, ".npmignore"));
-  if (npmignore !== null) {
-    const rules = parseIgnore(npmignore);
-    return candidates.filter((f) => !isIgnored(f, rules));
+
+  if (pkgFiles) {
+    return candidates.filter((f) => {
+      const { matched, directLiteral } = evaluatePkgFileMatch(f, pkgFiles);
+      if (!matched) return false;
+      if (directLiteral) return true;
+      return !isTreeIgnored(f, dirRules, 1);
+    });
   }
-  const listed = await gitPublishable(sourceDir);
-  if (listed) return candidates.filter((f) => listed.has(f));
-  const gitignore = await textOrNull(path.join(sourceDir, ".gitignore"));
-  if (gitignore !== null) {
-    const rules = parseIgnore(gitignore);
-    return candidates.filter((f) => !isIgnored(f, rules));
-  }
-  return candidates;
+
+  const listed =
+    dirRules.get("")?.kind === "npmignore"
+      ? null
+      : await gitPublishable(sourceDir);
+
+  return candidates.filter((f) => {
+    if (hasAncestorNpmignore(f, dirRules)) {
+      return !isTreeIgnored(f, dirRules, 0);
+    }
+    if (listed) return listed.has(f);
+    return !isTreeIgnored(f, dirRules, 0);
+  });
 }
 
 /**
