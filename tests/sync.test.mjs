@@ -1112,14 +1112,13 @@ test("restore still refuses when unrelated managed data changed after the operat
 });
 test("local edits to a managed patch file of a dirty Git plugin do not block the restore", async (t) => {
   const f = await fixture(t, { installed: true, patch: true }),
-    { execFileSync } = await import("node:child_process"),
-    { realpath } = await import("node:fs/promises");
+    { execFileSync } = await import("node:child_process");
   const row = (await f.adapter.list())[0];
-  // sourceState matches patch files by name relative to git's toplevel, so
-  // the reported path must be the canonical one (/private/var on macOS); the
-  // home goes with it so installedFile's containment check still holds.
-  const checkout = await realpath(row.path);
-  f.ctx.home = await realpath(f.ctx.home);
+  // Keep the fixture's own paths: the tmpdir prefix carries a symlinked
+  // component on macOS (/var → /private/var) and a linked daemon home must
+  // not defeat sourceState's patch allowance nor installedFile; both
+  // derive names from the canonical roots.
+  const checkout = row.path;
   const git = (...args) =>
     execFileSync(
       "git",

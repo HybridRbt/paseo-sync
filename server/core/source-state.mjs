@@ -78,11 +78,17 @@ export async function sourceState(row, profile) {
   const allowed = new Map();
   for (const b of profile.patches.filter((b) => b.plugin === row.id))
     for (const f of b.data.files) {
+      // Git reports status names against the canonical toplevel, while
+      // row.path from the daemon may carry symlink components (a linked
+      // home or a macOS /var checkout). safeFile resolves the root through
+      // realpath, so the derived name matches the porcelain entry instead
+      // of a ../..-prefixed one that read every patched file as dirty.
+      const file = await safeFile(row.path, f.path);
       const name = path
-        .relative(top, path.join(row.path, ...f.path.split("/")))
+        .relative(top, file)
         .split(path.sep)
         .join("/");
-      const raw = await bytesOrNull(await safeFile(row.path, f.path));
+      const raw = await bytesOrNull(file);
       if (raw !== null && digest(raw) === f.afterSha256)
         allowed.set(name, true);
     }
