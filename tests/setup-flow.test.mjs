@@ -133,10 +133,11 @@ test("a payable-free job history updates progress with implications and checkout
     cafe: true,
     prepared: true,
   });
+  // Publishing exports this host's configuration but neither checks nor
+  // applies Cafe exclusions, so it must leave the pending Cafe step alone.
   assert.deepEqual(progressFromJob(base, "publish", "/profile"), {
     ...base,
     applied: true,
-    cafe: true,
     prepared: true,
   });
   // Switching checkouts starts a fresh progress for that checkout.
