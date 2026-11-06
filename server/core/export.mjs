@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdir } from "node:fs/promises";
+import path from "node:path";
 import {
   safeFile,
   jsonOrNull,
@@ -11,7 +12,7 @@ import {
   digest,
   privateRoot,
 } from "./files.mjs";
-import { packPluginDirectory } from "./bundle.mjs";
+import { packPluginDirectory, resolveBundleArchive } from "./bundle.mjs";
 import {
   isPortablePlugin,
   snapshotPlugin,
@@ -92,21 +93,70 @@ export async function exportProfile(ctx) {
   const skipped = [];
   const bundled = new Map();
   for (const row of rows) {
-    if (!isPortablePlugin(row)) {
-      if (row.installation?.identity?.kind === "directory" && row.path) {
+    if (row.installation?.identity?.kind === "directory" && row.path) {
+      if (isPortablePlugin(row)) {
+        // Installed bundle plugin with a valid marker
+        const state = await sourceState(row, loaded ?? { patches: [] });
+        if (state && !state.clean) {
+          skipped.push(
+            state.head === (row.installation.currentRevision ?? state.head)
+              ? {
+                  plugin: row.id,
+                  reason: "local-source-changes",
+                  files: state.changed,
+                }
+              : {
+                  plugin: row.id,
+                  reason: "head-differs",
+                  head: state.head,
+                  revision: row.installation.currentRevision,
+                },
+          );
+          continue;
+        }
+        const snap = snapshotPlugin(row);
+        const relPath = snap.source.startsWith("bundle:")
+          ? snap.source.slice(7)
+          : `bundles/${row.id}.tar.gz`;
+        const archiveBuffer = await resolveBundleArchive(ctx, snap, row.path);
+        if (!archiveBuffer) {
+          skipped.push({
+            plugin: row.id,
+            reason: "untracked",
+          });
+          continue;
+        }
+        bundled.set(row.id, {
+          descriptor: snap,
+          buffer: archiveBuffer,
+          relPath,
+        });
+        continue;
+      } else {
+        // Unbundled directory checkout without marker
         try {
           const manifest = await jsonOrNull(
             await safeFile(row.path, "paseo-plugin.json"),
           );
           if (!manifest) throw new Error("Missing paseo-plugin.json");
           const packed = await packPluginDirectory(row.path);
+          const descriptor = {
+            id: row.id,
+            source: `bundle:bundles/${row.id}.tar.gz`,
+            revision: packed.sha256,
+            enabled: row.enabled,
+          };
+          if (ctx.state) {
+            const cachedFile = path.join(
+              ctx.state,
+              "bundles",
+              `${row.id}-${packed.sha256}.tar.gz`,
+            );
+            await mkdir(path.dirname(cachedFile), { recursive: true });
+            await atomicWrite(cachedFile, packed.buffer);
+          }
           bundled.set(row.id, {
-            descriptor: {
-              id: row.id,
-              source: `bundle:bundles/${row.id}.tar.gz`,
-              revision: packed.sha256,
-              enabled: row.enabled,
-            },
+            descriptor,
             buffer: packed.buffer,
             relPath: `bundles/${row.id}.tar.gz`,
           });
@@ -119,17 +169,15 @@ export async function exportProfile(ctx) {
           continue;
         }
       }
+    }
+    if (!isPortablePlugin(row)) {
       skipped.push({
         plugin: row.id,
         reason: "untracked",
       });
       continue;
     }
-    if (
-      (row.installation?.identity?.kind !== "git" &&
-        row.installation?.identity?.kind !== "directory") ||
-      !row.path
-    )
+    if (row.installation?.identity?.kind !== "git" || !row.path)
       continue;
     // sourceState shares the cleanliness notion of apply and baseline capture:
     // recorded patch applications stay clean, any other working-tree change or

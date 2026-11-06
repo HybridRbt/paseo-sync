@@ -26,6 +26,7 @@ import {
   unpackBundle,
   packPluginDirectory,
   BUNDLE_MARKER,
+  resolveBundleArchive,
 } from "./bundle.mjs";
 
 function skipMissingDisabled(ctx, current, target) {
@@ -144,29 +145,7 @@ function bundleCacheFile(ctx, pluginId, revision) {
 }
 
 async function getBundleArchive(ctx, target) {
-  if (ctx.state) {
-    const cachedFile = bundleCacheFile(ctx, target.id, target.revision);
-    const cachedRaw = await bytesOrNull(cachedFile);
-    if (cachedRaw && digest(cachedRaw) === target.revision) {
-      return cachedRaw;
-    }
-  }
-  if (ctx.root && target.source?.startsWith("bundle:")) {
-    const bundleRel = target.source.slice(7);
-    try {
-      const bundlePath = await safeFile(ctx.root, bundleRel);
-      const repoRaw = await bytesOrNull(bundlePath);
-      if (repoRaw && digest(repoRaw) === target.revision) {
-        if (ctx.state) {
-          const cachedFile = bundleCacheFile(ctx, target.id, target.revision);
-          await mkdir(path.dirname(cachedFile), { recursive: true });
-          await atomicWrite(cachedFile, repoRaw);
-        }
-        return repoRaw;
-      }
-    } catch {}
-  }
-  return null;
+  return resolveBundleArchive(ctx, target);
 }
 
 async function cacheBundleArchive(ctx, pluginId, revision, buffer) {

@@ -230,3 +230,30 @@ test("preserve executable permissions through bundle round trips", async () => {
     await rm(dst, { recursive: true, force: true });
   }
 });
+
+test("validate tar path components by UTF-8 byte length and reject unrepresentable long names", async () => {
+  const { buildTarHeader } = await import("../server/core/bundle.mjs");
+
+  // 1. Basename exceeding 100 UTF-8 bytes (e.g. 60 'é' chars = 120 bytes) cannot fit in ustar 100-byte name field
+  const longMultibyteBasename = "assets/" + "é".repeat(60) + ".js";
+  assert.throws(
+    () => buildTarHeader(longMultibyteBasename, 10),
+    /Path too long for tar header/,
+  );
+
+  // 2. Multibyte path that splits cleanly across prefix (<= 155 bytes) and shortName (<= 100 bytes)
+  const prefixPart = "assets/" + "é".repeat(30); // 7 + 60 = 67 bytes <= 155
+  const namePart = "é".repeat(30) + ".js"; // 60 + 3 = 63 bytes <= 100
+  const validMultibytePath = `${prefixPart}/${namePart}`;
+  const header = buildTarHeader(validMultibytePath, 5);
+  const parsed = parseTarEntries(Buffer.concat([header, Buffer.alloc(512)]));
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].name, validMultibytePath);
+
+  // 3. Regular ASCII long path (> 100 bytes) splitting cleanly
+  const longAsciiPath = "deep/directory/structure/that/exceeds/one/hundred/bytes/in/total/length/to/test/prefix/handling/file.js";
+  const asciiHeader = buildTarHeader(longAsciiPath, 5);
+  const parsedAscii = parseTarEntries(Buffer.concat([asciiHeader, Buffer.alloc(512)]));
+  assert.equal(parsedAscii.length, 1);
+  assert.equal(parsedAscii[0].name, longAsciiPath);
+});

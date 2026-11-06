@@ -79,6 +79,15 @@ export async function sourceState(row, profile) {
       if (!meta.source?.startsWith("bundle:") || !meta.revision) return null;
       const currentFiles = await fingerprintDirectory(row.path);
       const changed = [];
+      const patchAllowed = new Map();
+      if (profile?.patches) {
+        for (const b of profile.patches.filter((b) => b.plugin === row.id)) {
+          for (const f of b.data?.files ?? []) {
+            const rel = path.normalize(f.path).replace(/\\/g, "/");
+            patchAllowed.set(rel, f.afterSha256);
+          }
+        }
+      }
       if (meta.files && typeof meta.files === "object") {
         const expectedFiles = meta.files;
         const allPaths = new Set([
@@ -87,6 +96,9 @@ export async function sourceState(row, profile) {
         ]);
         for (const p of allPaths) {
           if (currentFiles[p] !== expectedFiles[p]) {
+            if (patchAllowed.has(p) && currentFiles[p] === patchAllowed.get(p)) {
+              continue;
+            }
             changed.push(p);
           }
         }

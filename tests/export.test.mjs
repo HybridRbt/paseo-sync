@@ -457,3 +457,75 @@ test("after syncing an absent disabled plugin export preserves its intent, setti
   );
   await captureBaseline(ctx, await loadProfile(ctx.root));
 });
+
+test("export includes and copies archives for already-installed bundle plugins into fresh repository", async () => {
+  const f = await fixture();
+  const { packPluginDirectory, BUNDLE_MARKER } = await import("../server/core/bundle.mjs");
+  const { loadProfile } = await import("../server/core/profile.mjs");
+  const { atomicWrite, digest } = await import("../server/core/files.mjs");
+
+  const pluginDir = path.join(f.home, "local-plugins/bundle-test");
+  await mkdir(pluginDir, { recursive: true });
+  await writeFile(
+    path.join(pluginDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "bundle-test", name: "Bundle Test" }),
+  );
+  await writeFile(path.join(pluginDir, "index.js"), "console.log('bundle v1');\n");
+
+  const packed = await packPluginDirectory(pluginDir);
+  // Mark the directory as an installed bundle
+  await writeFile(
+    path.join(pluginDir, BUNDLE_MARKER),
+    JSON.stringify({
+      source: "bundle:bundles/bundle-test.tar.gz",
+      revision: packed.sha256,
+      files: packed.files,
+    }),
+  );
+
+  // Cache the archive in f.state/bundles
+  const cacheFile = path.join(f.state, "bundles", `bundle-test-${packed.sha256}.tar.gz`);
+  await mkdir(path.dirname(cacheFile), { recursive: true });
+  await atomicWrite(cacheFile, packed.buffer);
+
+  // Fresh destination repo root has NO bundles/ directory initially
+  const ctx = {
+    root: f.root,
+    home: f.home,
+    state: f.state,
+    adapter: {
+      list: async () => [
+        {
+          id: "bundle-test",
+          enabled: true,
+          status: "running",
+          path: pluginDir,
+          installation: {
+            identity: { kind: "directory" },
+          },
+        },
+      ],
+    },
+  };
+
+  // Export into fresh repo
+  await exportProfile(ctx);
+
+  // Check profile.json
+  const manifest = JSON.parse(await readFile(path.join(f.root, "profile.json"), "utf8"));
+  const exportedPlugin = manifest.plugins.find((p) => p.id === "bundle-test");
+  assert.ok(exportedPlugin);
+  assert.equal(exportedPlugin.source, "bundle:bundles/bundle-test.tar.gz");
+  assert.equal(exportedPlugin.revision, packed.sha256);
+
+  // Check that the bundle archive was copied into the fresh repository
+  const repoBundlePath = path.join(f.root, "bundles/bundle-test.tar.gz");
+  const repoBundleBytes = await readFile(repoBundlePath);
+  assert.equal(digest(repoBundleBytes), packed.sha256);
+
+  // Check that loadProfile succeeds without ENOENT
+  const loaded = await loadProfile(f.root);
+  assert.equal(loaded.manifest.plugins.length, 1);
+  assert.equal(loaded.bundles.length, 1);
+  assert.equal(loaded.bundles[0].plugin, "bundle-test");
+});

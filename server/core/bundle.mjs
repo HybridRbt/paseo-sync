@@ -3,6 +3,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import crypto from "node:crypto";
 import { gitRaw } from "./git.mjs";
+import { safeFile, bytesOrNull, digest, atomicWrite } from "./files.mjs";
 
 export const DEFAULT_MAX_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB
 export const BUNDLE_MARKER = ".paseo-sync-bundle.json";
@@ -65,25 +66,44 @@ export function safeArchiveRelativePath(entryPath, targetDir) {
  * Builds a valid ustar tar header buffer (512 bytes). Only the executable
  * bit is meaningful in `mode`: it is normalized to 0755 or 0644 so archives
  * stay deterministic across umasks.
+ *
+ * ustar splits paths > 100 bytes into a prefix (<= 155 bytes) and short name
+ * (<= 100 bytes) at a slash boundary. The boundaries must be validated by
+ * UTF-8 byte length (not character count) so multibyte characters are never
+ * silently truncated.
  */
 export function buildTarHeader(name, size, typeflag = "0", mode = 0o644) {
   const buf = Buffer.alloc(512);
 
-  // name (100)
+  // name (100) and prefix (155) fields in ustar format
   const nameBuf = Buffer.from(name, "utf8");
-  if (nameBuf.length > 100) {
-    // Prefix support for paths > 100 chars
-    const lastSlash = name.lastIndexOf("/", 155);
-    if (lastSlash > 0 && name.length - lastSlash - 1 <= 100) {
-      const prefix = name.slice(0, lastSlash);
-      const shortName = name.slice(lastSlash + 1);
-      Buffer.from(shortName, "utf8").copy(buf, 0, 0, 100);
-      Buffer.from(prefix, "utf8").copy(buf, 345, 0, 155);
+  if (nameBuf.length <= 100) {
+    nameBuf.copy(buf, 0);
+  } else {
+    let splitIdx = -1;
+    for (let i = name.length - 1; i >= 0; i--) {
+      if (name[i] === "/") {
+        const prefix = name.slice(0, i);
+        const shortName = name.slice(i + 1);
+        if (
+          prefix.length > 0 &&
+          shortName.length > 0 &&
+          Buffer.byteLength(prefix, "utf8") <= 155 &&
+          Buffer.byteLength(shortName, "utf8") <= 100
+        ) {
+          splitIdx = i;
+          break;
+        }
+      }
+    }
+    if (splitIdx > 0) {
+      const prefix = name.slice(0, splitIdx);
+      const shortName = name.slice(splitIdx + 1);
+      Buffer.from(shortName, "utf8").copy(buf, 0);
+      Buffer.from(prefix, "utf8").copy(buf, 345);
     } else {
       throw new Error(`Path too long for tar header: ${name}`);
     }
-  } else {
-    nameBuf.copy(buf, 0);
   }
 
   // mode (8 bytes octal)
@@ -497,4 +517,62 @@ export async function unpackBundle(archiveBufferOrPath, targetDir, options = {})
     files,
     extractedTo: targetDir,
   };
+}
+
+/**
+ * Resolves a bundle archive buffer matching a descriptor's declared revision:
+ * (1) checks local state cache: ctx.state/bundles/${id}-${revision}.tar.gz
+ * (2) checks profile repository root: ctx.root/${source.slice(7)}
+ * (3) reconstructs and verifies from plugin directory if provided
+ * Populates ctx.state cache when an archive is retrieved or reconstructed.
+ */
+export async function resolveBundleArchive(ctx, target, pluginPath = null) {
+  if (ctx?.state && target?.id && target?.revision) {
+    const cachedFile = path.join(
+      ctx.state,
+      "bundles",
+      `${target.id}-${target.revision}.tar.gz`,
+    );
+    const cachedRaw = await bytesOrNull(cachedFile);
+    if (cachedRaw && digest(cachedRaw) === target.revision) {
+      return cachedRaw;
+    }
+  }
+  if (ctx?.root && target?.source?.startsWith("bundle:") && target?.revision) {
+    const bundleRel = target.source.slice(7);
+    try {
+      const bundlePath = await safeFile(ctx.root, bundleRel);
+      const repoRaw = await bytesOrNull(bundlePath);
+      if (repoRaw && digest(repoRaw) === target.revision) {
+        if (ctx.state && target.id) {
+          const cachedFile = path.join(
+            ctx.state,
+            "bundles",
+            `${target.id}-${target.revision}.tar.gz`,
+          );
+          await mkdir(path.dirname(cachedFile), { recursive: true });
+          await atomicWrite(cachedFile, repoRaw);
+        }
+        return repoRaw;
+      }
+    } catch {}
+  }
+  if (pluginPath && target?.revision) {
+    try {
+      const packed = await packPluginDirectory(pluginPath);
+      if (packed.sha256 === target.revision) {
+        if (ctx?.state && target?.id) {
+          const cachedFile = path.join(
+            ctx.state,
+            "bundles",
+            `${target.id}-${target.revision}.tar.gz`,
+          );
+          await mkdir(path.dirname(cachedFile), { recursive: true });
+          await atomicWrite(cachedFile, packed.buffer);
+        }
+        return packed.buffer;
+      }
+    } catch {}
+  }
+  return null;
 }
