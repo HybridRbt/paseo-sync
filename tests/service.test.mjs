@@ -166,3 +166,42 @@ test("service.openCheckout dispatches shortcut open to openShortcut handler with
   assert.deepEqual(spawned[0].args, []);
   assert.equal(spawned[0].opts.cwd, f.settings.checkout);
 });
+
+test("service threads preferProfile and preferLocal through preview and execution and binds approvals", async () => {
+  const f = await fixture();
+  const s = service.createService(f);
+
+  const p1 = await done(s, await s.start({ kind: "plan", preferProfile: true }));
+  assert.equal(p1.status, "succeeded", p1.error);
+  assert.equal(p1.result.preferProfile, true);
+  // Mismatched preferProfile flag must reject as stale
+  const mismatchApply = await done(
+    s,
+    await s.start({ kind: "apply", approval: p1.result.approval }),
+  );
+  assert.equal(mismatchApply.status, "failed");
+  assert.match(mismatchApply.error, /stale/i);
+  const okApply = await done(
+    s,
+    await s.start({
+      kind: "apply",
+      approval: p1.result.approval,
+      preferProfile: true,
+    }),
+  );
+  assert.equal(okApply.status, "succeeded", okApply.error);
+
+  const pub1 = await done(
+    s,
+    await s.start({ kind: "publishPlan", preferLocal: true }),
+  );
+  assert.equal(pub1.status, "succeeded", pub1.error);
+  assert.equal(pub1.result.preferLocal, true);
+  const mismatchPub = await done(
+    s,
+    await s.start({ kind: "publish", approval: pub1.result.approval }),
+  );
+  assert.equal(mismatchPub.status, "failed");
+  assert.match(mismatchPub.error, /stale/i);
+});
+

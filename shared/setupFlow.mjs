@@ -104,7 +104,7 @@ export function progressFromJob(progress, kind, checkout) {
   if (kind === "inspect") next.inspected = true;
   else next.prepared = true;
   if (kind === "cafe") next.cafe = true;
-  if (kind === "apply") {
+  if (kind === "apply" || kind === "publish") {
     next.applied = true;
     next.cafe = true;
   }

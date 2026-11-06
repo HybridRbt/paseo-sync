@@ -10,6 +10,7 @@ import {
   digest,
 } from "./files.mjs";
 import {
+  isPortablePlugin,
   snapshotPlugin,
   pluginIdentity,
   validateSettings,
@@ -78,12 +79,21 @@ export async function exportProfile(ctx) {
         !ctx.selfIds?.includes(p.id),
     ) ?? [];
   const retainedIds = new Set(retained.map((p) => p.id));
-  // A Git plugin whose local source is not a clean, provenance-matching
-  // revision cannot be exported portably. Instead of blocking the whole
-  // profile, the plugin is skipped: a previously published entry stays as the
-  // repository has it, and an unpublished one is left out of this export.
+  // An untracked or non-portable plugin (such as a local directory development
+  // checkout) cannot be exported portably. A Git plugin whose local source is
+  // not a clean, provenance-matching revision cannot be exported portably either.
+  // Instead of blocking the whole profile, the plugin is skipped: a previously
+  // published entry stays as the repository has it, and an unpublished one is
+  // left out of this export.
   const skipped = [];
   for (const row of rows) {
+    if (!isPortablePlugin(row)) {
+      skipped.push({
+        plugin: row.id,
+        reason: "untracked",
+      });
+      continue;
+    }
     if (row.installation?.identity.kind !== "git" || !row.path) continue;
     // sourceState shares the cleanliness notion of apply and baseline capture:
     // recorded patch applications stay clean, any other working-tree change or
@@ -121,7 +131,7 @@ export async function exportProfile(ctx) {
     ...retained,
   ].sort((a, b) => a.id.localeCompare(b.id));
   const previous = await jsonOrNull(await safeFile(ctx.state, "baseline.json"));
-  if (loaded && previous) {
+  if (loaded && previous && !ctx.preferLocal) {
     const ids = new Set([
       ...loaded.manifest.plugins.map((p) => p.id),
       ...plugins.map((p) => p.id),
@@ -162,7 +172,7 @@ export async function exportProfile(ctx) {
       (s) => retainedIds.has(s.plugin) || carriedIds.has(s.plugin),
     ) ?? []),
   );
-  if (loaded && previous) {
+  if (loaded && previous && !ctx.preferLocal) {
     const names = new Set([
       ...loaded.settings.map((s) => s.file),
       ...settings.map((s) => s.file),

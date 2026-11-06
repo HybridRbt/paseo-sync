@@ -254,3 +254,117 @@ test("bilingual translations cover all checkout shortcut labels and feedback", a
     assert.equal(zh(key, params), expectedZh);
   }
 });
+
+test("formatConflict and overwrite mode translations render bilingually", async () => {
+  const { translator, formatConflict } = await import("../client/i18n.mjs");
+  const en = translator("en");
+  const zh = translator("zh");
+
+  assert.equal(
+    formatConflict(
+      "Local changes conflict with profile: better-paseo. Export local changes or review --prefer-profile.",
+      zh,
+    ),
+    "本机配置与云端存在冲突：better-paseo。可选择「用本机配置覆盖云端」或「忽略本机改动，用云端覆盖本机」。",
+  );
+  assert.equal(
+    formatConflict(
+      "Local changes conflict with profile: better-paseo. Export local changes or review --prefer-profile.",
+      en,
+    ),
+    "Local changes conflict with the cloud profile: better-paseo. Choose “Overwrite cloud with this host” or “Ignore local changes and apply cloud profile”.",
+  );
+  assert.equal(
+    formatConflict(
+      "Exact registry version transition is not supported: paseo-cafe. Review registry provenance separately; no reinstall will be attempted.",
+      zh,
+    ),
+    "注册表安装的插件不支持直接切换历史版本：paseo-cafe。可选择「用本机配置覆盖云端」，或选择「用云端覆盖本机」以跳过该插件版本切换。",
+  );
+  assert.equal(
+    formatConflict(
+      "Exact registry version transition is not supported: paseo-cafe. Review registry provenance separately; no reinstall will be attempted.",
+      en,
+    ),
+    "Exact registry version transition is not supported: paseo-cafe. Choose “Overwrite cloud with this host”, or choose “Apply cloud profile” to skip this plugin's version transition.",
+  );
+  assert.equal(
+    formatConflict(
+      "Repository has unapplied changes for extra; apply or reconcile before exporting.",
+      zh,
+    ),
+    "云端配置仓库存在尚未应用到本机的插件变更：extra。可先同步到本机，或选择「强制用本机配置覆盖云端」。",
+  );
+  assert.equal(
+    formatConflict(
+      "Repository has unapplied changes for extra; apply or reconcile before exporting.",
+      en,
+    ),
+    "The configuration repository has unapplied changes for extra. Sync to this host first, or choose “Force overwrite cloud with this host”.",
+  );
+  assert.equal(
+    formatConflict(
+      "Repository has unapplied settings changes: settings/better-paseo/presentation.json",
+      zh,
+    ),
+    "云端配置仓库存在尚未应用到本机的设置变更：settings/better-paseo/presentation.json。可先同步到本机，或选择「强制用本机配置覆盖云端」。",
+  );
+  assert.equal(
+    formatConflict(
+      "Repository has unapplied settings changes: settings/better-paseo/presentation.json",
+      en,
+    ),
+    "The configuration repository has unapplied settings changes: settings/better-paseo/presentation.json. Sync to this host first, or choose “Force overwrite cloud with this host”.",
+  );
+
+  const uiKeys = [
+    [
+      "跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。",
+      "Skipped demo: local development or untracked plugin; its changes are not published this time.",
+      "跳过 demo：本地开发或未受管插件，本次不发布它的变更。",
+      { plugin: "demo" },
+    ],
+    [
+      "跳过 {plugin}：注册表安装插件不支持直接切换固定版本（本机 {head}，云端 {revision}），本次保留本机版本。",
+      "Skipped cafe: registry-installed plugins do not support in-place version pinning (host 1.1.1, cloud 1.0.1); keeping host version.",
+      "跳过 cafe：注册表安装插件不支持直接切换固定版本（本机 1.1.1，云端 1.0.1），本次保留本机版本。",
+      { plugin: "cafe", head: "1.1.1", revision: "1.0.1" },
+    ],
+    [
+      "用本机配置覆盖云端（预览发布）",
+      "Overwrite cloud with this host (preview publish)",
+      "用本机配置覆盖云端（预览发布）",
+    ],
+    [
+      "忽略本机改动，用云端覆盖本机（重新预览）",
+      "Ignore local changes, overwrite this host with cloud (re-preview)",
+      "忽略本机改动，用云端覆盖本机（重新预览）",
+    ],
+    [
+      "忽略云端未应用改动，强制用本机配置覆盖云端（重新预览）",
+      "Ignore unapplied cloud changes, force overwrite cloud with this host (re-preview)",
+      "忽略云端未应用改动，强制用本机配置覆盖云端（重新预览）",
+    ],
+    [
+      "已启用「用云端覆盖本机」模式：将忽略本机自上次同步以来的本地修改，按云端配置应用。",
+      "“Overwrite host with cloud” mode enabled: local edits since the last sync will be overwritten by the cloud profile.",
+      "已启用「用云端覆盖本机」模式：将忽略本机自上次同步以来的本地修改，按云端配置应用。",
+    ],
+    [
+      "已启用「用本机覆盖云端」模式：将忽略云端未应用的远端修改，直接导出本机当前配置。",
+      "“Overwrite cloud with host” mode enabled: unapplied cloud changes will be overwritten by this host's current configuration.",
+      "已启用「用本机覆盖云端」模式：将忽略云端未应用的远端修改，直接导出本机当前配置。",
+    ],
+    [
+      "预览并应用或发布同步配置",
+      "Preview and apply or publish the configuration",
+      "预览并应用或发布同步配置",
+    ],
+  ];
+
+  for (const [key, expectedEn, expectedZh, params] of uiKeys) {
+    assert.equal(en(key, params), expectedEn);
+    assert.equal(zh(key, params), expectedZh);
+  }
+});
+

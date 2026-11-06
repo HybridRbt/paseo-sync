@@ -133,6 +133,12 @@ test("a payable-free job history updates progress with implications and checkout
     cafe: true,
     prepared: true,
   });
+  assert.deepEqual(progressFromJob(base, "publish", "/profile"), {
+    ...base,
+    applied: true,
+    cafe: true,
+    prepared: true,
+  });
   // Switching checkouts starts a fresh progress for that checkout.
   assert.deepEqual(progressFromJob(base, "apply", "/other"), {
     checkout: "/other",

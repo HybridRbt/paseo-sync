@@ -1112,14 +1112,13 @@ test("restore still refuses when unrelated managed data changed after the operat
 });
 test("local edits to a managed patch file of a dirty Git plugin do not block the restore", async (t) => {
   const f = await fixture(t, { installed: true, patch: true }),
-    { execFileSync } = await import("node:child_process"),
-    { realpath } = await import("node:fs/promises");
+    { execFileSync } = await import("node:child_process");
   const row = (await f.adapter.list())[0];
-  // sourceState matches patch files by name relative to git's toplevel, so
-  // the reported path must be the canonical one (/private/var on macOS); the
-  // home goes with it so installedFile's containment check still holds.
-  const checkout = await realpath(row.path);
-  f.ctx.home = await realpath(f.ctx.home);
+  // Keep the fixture's own paths: the tmpdir prefix carries a symlinked
+  // component on macOS (/var → /private/var) and a linked daemon home must
+  // not defeat sourceState's patch allowance nor installedFile; both
+  // derive names from the canonical roots.
+  const checkout = row.path;
   const git = (...args) =>
     execFileSync(
       "git",
@@ -1576,4 +1575,139 @@ test("restore never rolls back external settings changes for a plugin skipped by
   const restored = await restore(f.ctx, r.backupId, undo.approval);
   assert.deepEqual(restored.retainedDisabledPlugins, ["firstmate"]);
   assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), external);
+});
+
+test("preferProfile skips unsupported registry version transitions as disclosed skips while applying other plugins", async (t) => {
+  const f = await fixture(t, { installed: true });
+  // Initial sync to establish baseline
+  let p = await buildPlan(f.ctx);
+  await applyPlan(f.ctx, p.approval);
+
+  // Add a registry-installed plugin locally at 1.1.1 while profile wants 1.0.1,
+  // and modify better-paseo settings locally so both localConflict and registry transition exist.
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows.push({
+      id: "paseo-cafe",
+      path: path.join(f.home, "plugins/paseo-cafe/1.1.1"),
+      enabled: true,
+      status: "running",
+      installation: {
+        identity: {
+          kind: "npm",
+          packageName: "paseo-cafe",
+          pluginPath: ".",
+          registry: { url: "https://plugins.paseo.sh", id: "paseo-cafe/cafe" },
+        },
+        currentRevision: "1.1.1",
+      },
+    });
+    return rows;
+  };
+  f.manifest.plugins.push({
+    id: "paseo-cafe",
+    source: "npm:paseo-cafe",
+    revision: "1.0.1",
+    enabled: true,
+    registry: { url: "https://plugins.paseo.sh", id: "paseo-cafe/cafe" },
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
+  await writeJson(path.join(f.root, f.manifest.settings[0].file), {
+    version: 1,
+    values: { previewWrap: true, previewStripes: true },
+  });
+
+  const normal = await buildPlan(f.ctx);
+  assert.ok(normal.conflicts.some((x) => /Local changes conflict/i.test(x)));
+  assert.ok(normal.conflicts.some((x) => /Exact registry version transition/i.test(x)));
+
+  const preferred = await buildPlan({ ...f.ctx, preferProfile: true });
+  assert.equal(preferred.preferProfile, true);
+  assert.deepEqual(preferred.conflicts, []);
+  assert.deepEqual(preferred.skipped, [
+    {
+      plugin: "paseo-cafe",
+      reason: "registry-version-transition",
+      head: "1.1.1",
+      revision: "1.0.1",
+    },
+  ]);
+  const res = await applyPlan(
+    { ...f.ctx, preferProfile: true },
+    preferred.approval,
+  );
+  assert.equal(res.changed, true);
+  assert.equal(res.verification.configurationMatches, true);
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")).values, {
+    previewWrap: true,
+    previewStripes: true,
+  });
+});
+
+test("an untracked installation sharing the target id is disclosed and skipped instead of crashing apply", async (t) => {
+  const f = await fixture(t, { installed: true });
+  const row = (await f.adapter.list())[0];
+  // The row exists but cannot be snapshotted: an untracked or local
+  // development installation without usable installation metadata. It must
+  // not be presented as an absent plugin (which offered a conflict-free
+  // install that crashed applyPlan on the null descriptor).
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {};
+    return rows;
+  };
+  const plan = await buildPlan(f.ctx);
+  assert.deepEqual(plan.skipped, [
+    { plugin: "better-paseo", reason: "untracked", checkout: row.path },
+  ]);
+  assert.deepEqual(plan.conflicts, []);
+  assert.deepEqual(plan.changes, []);
+  const { canConfirmPreview, translator } = await import("../client/i18n.mjs");
+  // The skip is only a disclosure: confirm stays armed.
+  assert.equal(canConfirmPreview({ ...plan, confirmKind: "apply" }), true);
+  for (const language of ["zh", "en"]) {
+    const line =
+      "跳过 {plugin}：本地开发或未受管插件，本次不应用到本机。";
+    const translated = translator(language)(line, { plugin: "better-paseo" });
+    assert.ok(translated.includes("better-paseo"));
+    assert.notEqual(translated, line);
+  }
+  const r = await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  assert.equal(r.changed, false);
+  assert.deepEqual(f.calls, []);
+});
+test("restore discloses an unidentifiable backup entry instead of crashing on a null descriptor", async (t) => {
+  const f = await fixture(t, { installed: true });
+  const r = await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  // A failed or interrupted capture used to store this plugin as a record
+  // with a null descriptor; restorePlan dereferenced it and crashed. Simulate
+  // that legacy shape and expect an untracked disclosure instead.
+  const file = path.join(f.state, "backups", r.backupId + ".json"),
+    b = JSON.parse(await readFile(file, "utf8"));
+  b.before.plugins["better-paseo"].descriptor = null;
+  await writeFile(file, JSON.stringify(b, null, 2));
+  const preview = await restorePlan(f.ctx, r.backupId);
+  assert.deepEqual(preview.conflicts, []);
+  assert.deepEqual(preview.skipped, [
+    { plugin: "better-paseo", reason: "untracked", restore: true },
+  ]);
+  const { canConfirmPreview, translator } = await import("../client/i18n.mjs");
+  assert.equal(canConfirmPreview({ ...preview, confirmKind: "restore" }), true);
+  for (const language of ["zh", "en"]) {
+    const line =
+      "跳过 {plugin}：备份或本机插件缺少可识别的安装来源，本次恢复不改动该插件。";
+    const translated = translator(language)(line, { plugin: "better-paseo" });
+    assert.ok(translated.includes("better-paseo"));
+    assert.notEqual(translated, line);
+  }
+  f.calls.length = 0;
+  const restored = await restore(f.ctx, r.backupId, preview.approval);
+  assert.equal(restored.restored, true);
+  // The unidentifiable installation is untouched: no adapter choreography
+  // runs for it and its already-applied settings stay in place.
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), f.target);
 });

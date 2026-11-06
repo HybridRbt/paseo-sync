@@ -134,7 +134,26 @@ async function exportSnapshot(ctx) {
           await bytesOrNull(await safeFile(ctx.root, file)),
         );
     }
-    const exported = await exportProfile({ ...ctx, root: temp });
+    let exported;
+    let conflicts = [];
+    try {
+      exported = await exportProfile({
+        ...ctx,
+        root: temp,
+        preferLocal: !!ctx.preferLocal,
+      });
+    } catch (err) {
+      if (!ctx.preferLocal && /Repository has unapplied/i.test(err.message)) {
+        conflicts = [err.message];
+        exported = await exportProfile({
+          ...ctx,
+          root: temp,
+          preferLocal: true,
+        });
+      } else {
+        throw err;
+      }
+    }
     const loaded = await loadProfile(temp);
     const files = [];
     for (const file of [
@@ -158,6 +177,8 @@ async function exportSnapshot(ctx) {
       upstream,
       pushUrl,
       files,
+      conflicts,
+      preferLocal: !!ctx.preferLocal,
       // Disclosed in the preview and bound into the approval hash: if a skipped
       // plugin recovers (or another one becomes dirty) between preview and
       // confirm, the reviewed approval is stale even when file bytes match.
@@ -174,6 +195,8 @@ async function exportSnapshot(ctx) {
         upstream,
         files,
         skipped: exported.skipped,
+        conflicts,
+        preferLocal: !!ctx.preferLocal,
       }),
     };
   } finally {
@@ -188,6 +211,7 @@ export async function publish(ctx, approval, { push = true } = {}) {
   return withOperation(ctx, async () => {
     const p = await exportSnapshot(ctx);
     if (p.approval !== approval) throw new Error("Publish preview is stale");
+    if (p.conflicts.length) throw new Error(p.conflicts.join("\n"));
     if (push && !p.origin)
       throw new Error("Publishing requires an origin remote");
     if (p.files.length) {
