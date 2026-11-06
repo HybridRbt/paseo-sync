@@ -19,6 +19,7 @@ import {
   saveLanguage,
   canConfirmPreview,
   renderDriftDisclosure,
+  formatConflict,
 } from "./i18n.mjs";
 import { mergeDiscovery, editCheckout } from "../shared/onboarding.mjs";
 import {
@@ -58,6 +59,8 @@ export type Preview = {
   confirmKind?: Request["kind"];
   backupId?: string;
   conflicts?: string[];
+  preferProfile?: boolean;
+  preferLocal?: boolean;
   currentChangedSinceBackup?:
     | boolean
     | {
@@ -74,7 +77,7 @@ export type Preview = {
         pluginsEnabled?: { from: boolean; to: boolean };
       };
 };
-export { canConfirmPreview, renderDriftDisclosure };
+export { canConfirmPreview, renderDriftDisclosure, formatConflict };
 // The first-time setup sequence shown at the top of the screen. Labels use the
 // same wording as the matching actions below.
 const SETUP_LABEL: Record<string, string> = {
@@ -82,7 +85,7 @@ const SETUP_LABEL: Record<string, string> = {
   prepare: "初始化或拉取仓库",
   inspect: "检查主机环境",
   cafe: "预览并确认 Cafe 排除项",
-  apply: "预览并应用同步配置",
+  apply: "预览并应用或发布同步配置",
 };
 
 // Prerequisite notices and real failures render differently: a missing setup
@@ -773,11 +776,98 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
                   kind: preview.confirmKind!,
                   approval: preview.approval!,
                   ...(preview.backupId ? { backupId: preview.backupId } : {}),
+                  ...(preview.preferProfile ? { preferProfile: true } : {}),
+                  ...(preview.preferLocal ? { preferLocal: true } : {}),
                 })
               }
             >
               <Text style={{ color: theme.colors.accentForeground }}>
                 {t("确认在 {host} 执行以上变更", { host: host.label })}
+              </Text>
+            </Pressable>
+          ) : null}
+          {preview.confirmKind === "apply" && preview.conflicts?.length ? (
+            <>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t("用本机配置覆盖云端（预览发布）")}
+                disabled={disabled}
+                style={{
+                  padding: 14,
+                  backgroundColor: theme.colors.surface1,
+                  borderColor: theme.colors.border,
+                  borderWidth: 1,
+                  opacity: disabled ? 0.5 : 1,
+                }}
+                onPress={() =>
+                  void run({
+                    kind: "publishPlan",
+                    preferLocal: true,
+                  })
+                }
+              >
+                <Text style={text}>
+                  {t("用本机配置覆盖云端（预览发布）")}
+                </Text>
+              </Pressable>
+              {!preview.preferProfile &&
+              preview.conflicts.some(
+                (c) =>
+                  c.startsWith("Local changes conflict with profile:") ||
+                  c.startsWith(
+                    "Exact registry version transition is not supported:",
+                  ),
+              ) ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={t("忽略本机改动，用云端覆盖本机（重新预览）")}
+                  disabled={disabled}
+                  style={{
+                    padding: 14,
+                    backgroundColor: theme.colors.surface1,
+                    borderColor: theme.colors.border,
+                    borderWidth: 1,
+                    opacity: disabled ? 0.5 : 1,
+                  }}
+                  onPress={() =>
+                    void run({
+                      kind: "plan",
+                      preferProfile: true,
+                    })
+                  }
+                >
+                  <Text style={text}>
+                    {t("忽略本机改动，用云端覆盖本机（重新预览）")}
+                  </Text>
+                </Pressable>
+              ) : null}
+            </>
+          ) : null}
+          {preview.confirmKind === "publish" &&
+          preview.conflicts?.length &&
+          !preview.preferLocal ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t(
+                "忽略云端未应用改动，强制用本机配置覆盖云端（重新预览）",
+              )}
+              disabled={disabled}
+              style={{
+                padding: 14,
+                backgroundColor: theme.colors.surface1,
+                borderColor: theme.colors.border,
+                borderWidth: 1,
+                opacity: disabled ? 0.5 : 1,
+              }}
+              onPress={() =>
+                void run({
+                  kind: "publishPlan",
+                  preferLocal: true,
+                })
+              }
+            >
+              <Text style={text}>
+                {t("忽略云端未应用改动，强制用本机配置覆盖云端（重新预览）")}
               </Text>
             </Pressable>
           ) : null}
@@ -959,6 +1049,8 @@ export function ResultSummary({
 }) {
   const r = (value ?? {}) as {
     conflicts?: string[];
+    preferProfile?: boolean;
+    preferLocal?: boolean;
     currentChangedSinceBackup?: Preview["currentChangedSinceBackup"];
     skipped?: {
       plugin: string;
@@ -999,6 +1091,20 @@ export function ResultSummary({
   const text = { color };
   return (
     <View style={{ gap: 8 }}>
+      {r.preferProfile ? (
+        <Text selectable style={text}>
+          {t(
+            "已启用「用云端覆盖本机」模式：将忽略本机自上次同步以来的本地修改，按云端配置应用。",
+          )}
+        </Text>
+      ) : null}
+      {r.preferLocal ? (
+        <Text selectable style={text}>
+          {t(
+            "已启用「用本机覆盖云端」模式：将忽略云端未应用的远端修改，直接导出本机当前配置。",
+          )}
+        </Text>
+      ) : null}
       {r.pushUrl ? (
         <Text selectable style={text}>
           {t("发布到：")}
@@ -1008,7 +1114,7 @@ export function ResultSummary({
       {r.conflicts?.map((c, i) => (
         <Text selectable key={i} style={text}>
           {t("需处理：")}
-          {c}
+          {formatConflict(c, t)}
         </Text>
       ))}
       {r.currentChangedSinceBackup ? (
@@ -1117,7 +1223,7 @@ export function ResultSummary({
               ) : null}
               <Text selectable style={text}>
                 {t(
-                  "该插件本次保持本机现状，未被同步修改。在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览差异即可同步新版本。",
+                  "该插件本次保持本机现状，未被同步修改。在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再发布一次让新版本进入配置仓库，然后重新预览差异即可完成同步。",
                   { plugin: s.plugin },
                 )}
               </Text>
@@ -1148,18 +1254,64 @@ export function ResultSummary({
             </View>
           )
         ) : s.reason === "untracked" ? (
-          <View key={s.plugin} style={{ gap: 4 }}>
-            <Text selectable style={text}>
-              {t("跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。", {
-                plugin: s.plugin,
-              })}
+          s.restore ? (
+            <Text key={s.plugin} style={text}>
+              {t(
+                "跳过 {plugin}：备份或本机插件缺少可识别的安装来源，本次恢复不改动该插件。",
+                { plugin: s.plugin },
+              )}
             </Text>
-            <Text selectable style={text}>
-              {s.published
-                ? t("配置仓库沿用该插件已发布的版本。")
-                : t("该插件尚未发布过，本次不出现在配置中。")}
-            </Text>
-          </View>
+          ) : s.checkout !== undefined ? (
+            // Apply side: the untracked installation keeps its local state;
+            // the install directory and repair steps show how to converge.
+            <View key={s.plugin} style={{ gap: 4 }}>
+              <Text selectable style={text}>
+                {t("跳过 {plugin}：本地开发或未受管插件，本次不应用到本机。", {
+                  plugin: s.plugin,
+                })}
+              </Text>
+              <Text selectable style={text}>
+                {t("本机安装目录：{checkout}", { checkout: s.checkout })}
+              </Text>
+              {s.checkout ? (
+                <View style={{ paddingLeft: 8, paddingTop: 2 }}>
+                  <CheckoutShortcuts
+                    plugin={s.plugin}
+                    checkout={s.checkout}
+                    theme={theme}
+                    t={t}
+                    onOpen={onOpenCheckout}
+                  />
+                </View>
+              ) : null}
+              <Text selectable style={text}>
+                {t(
+                  "该插件本次保持本机现状，未被同步修改。请先核对其安装来源或移除该安装（如 paseo plugin uninstall {plugin}），再重新预览差异。",
+                  { plugin: s.plugin },
+                )}
+              </Text>
+            </View>
+          ) : (
+            <View key={s.plugin} style={{ gap: 4 }}>
+              <Text selectable style={text}>
+                {t("跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。", {
+                  plugin: s.plugin,
+                })}
+              </Text>
+              <Text selectable style={text}>
+                {s.published
+                  ? t("配置仓库沿用该插件已发布的版本。")
+                  : t("该插件尚未发布过，本次不出现在配置中。")}
+              </Text>
+            </View>
+          )
+        ) : s.reason === "registry-version-transition" ? (
+          <Text key={s.plugin} style={text}>
+            {t(
+              "跳过 {plugin}：注册表安装插件不支持直接切换固定版本（本机 {head}，云端 {revision}），本次保留本机版本。",
+              { plugin: s.plugin, head: s.head, revision: s.revision },
+            )}
+          </Text>
         ) : (
           <Text key={s.plugin} style={text}>
             {t("跳过 {plugin}：本机未安装，配置要求保持禁用。", {

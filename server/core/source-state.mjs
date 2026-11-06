@@ -70,7 +70,7 @@ async function installBuildScope(row, top) {
 }
 
 export async function sourceState(row, profile) {
-  if (row.installation?.identity.kind === "directory" && row.path) {
+  if (row.installation?.identity?.kind === "directory" && row.path) {
     const metaFile = path.join(row.path, BUNDLE_MARKER);
     const raw = await bytesOrNull(metaFile);
     if (!raw) return null;
@@ -83,7 +83,10 @@ export async function sourceState(row, profile) {
       if (profile?.patches) {
         for (const b of profile.patches.filter((b) => b.plugin === row.id)) {
           for (const f of b.data?.files ?? []) {
-            const rel = path.normalize(f.path).replace(/\\/g, "/");
+            const rel = path
+              .normalize(f.path)
+              .replace(/\\/g, "/")
+              .replace(/^(\.\/)+/, "");
             patchAllowed.set(rel, f.afterSha256);
           }
         }
@@ -121,7 +124,10 @@ export async function sourceState(row, profile) {
       return null;
     }
   }
-  if (row.installation?.identity.kind !== "git") return null;
+  // The row exists but may carry broken installation metadata (an untracked
+  // or local-development install that snapshotPlugin rejects); tolerate it
+  // instead of throwing on the missing identity.
+  if (row.installation?.identity?.kind !== "git") return null;
   const head = await git(row.path, "rev-parse", "HEAD");
   const status = await gitRaw(
     row.path,
@@ -134,11 +140,17 @@ export async function sourceState(row, profile) {
   const allowed = new Map();
   for (const b of profile.patches.filter((b) => b.plugin === row.id))
     for (const f of b.data.files) {
+      // Git reports status names against the canonical toplevel, while
+      // row.path from the daemon may carry symlink components (a linked
+      // home or a macOS /var checkout). safeFile resolves the root through
+      // realpath, so the derived name matches the porcelain entry instead
+      // of a ../..-prefixed one that read every patched file as dirty.
+      const file = await safeFile(row.path, f.path);
       const name = path
-        .relative(top, path.join(row.path, ...f.path.split("/")))
+        .relative(top, file)
         .split(path.sep)
         .join("/");
-      const raw = await bytesOrNull(await safeFile(row.path, f.path));
+      const raw = await bytesOrNull(file);
       if (raw !== null && digest(raw) === f.afterSha256)
         allowed.set(name, true);
     }

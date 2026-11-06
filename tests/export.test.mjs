@@ -127,6 +127,59 @@ test("export packages a valid directory plugin into a bundle archive instead of 
     flowlyEntry.revision,
   );
 });
+test("export with preferLocal overwrites unapplied remote plugin and settings changes", async () => {
+  const ctx = await fixture();
+  const plugin = {
+    id: "better-paseo",
+    source: "git:https://github.com/RoundRedDot/better-paseo",
+    revision: "a".repeat(40),
+    enabled: true,
+  };
+  const extra = {
+    id: "skills",
+    source: "npm:@gpambrozio/paseo-skills",
+    revision: "0.4.0",
+    enabled: true,
+  };
+  const doc = {
+    plugin: "better-paseo",
+    document: "presentation",
+    file: "settings/better-paseo/presentation.json",
+  };
+  await writeJson(path.join(ctx.root, "profile.json"), {
+    schemaVersion: 1,
+    plugins: [plugin, extra],
+    settings: [doc],
+    patches: [],
+  });
+  await writeJson(path.join(ctx.root, doc.file), {
+    version: 1,
+    values: { previewWrap: false, chatEnabled: false },
+  });
+  await writeJson(path.join(ctx.state, "baseline.json"), {
+    schemaVersion: 1,
+    plugins: { "better-paseo": plugin },
+    settings: {
+      [doc.file]: Buffer.from(
+        JSON.stringify({ version: 1, values: { previewWrap: true } }),
+      ).toString("base64"),
+    },
+  });
+  const git = (...args) =>
+    execFileSync("git", ["-C", ctx.root, ...args], { stdio: "pipe" });
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "remote state");
+
+  await assert.rejects(exportProfile(ctx), /unapplied/i);
+  const res = await exportProfile({ ...ctx, preferLocal: true });
+  assert.equal(res.exported, true);
+  const manifest = JSON.parse(
+    await readFile(path.join(ctx.root, "profile.json"), "utf8"),
+  );
+  assert.deepEqual(manifest.plugins.map((p) => p.id), ["better-paseo"]);
+});
 test("repository guard refuses tracked work and commits behind upstream", async () => {
   const ctx = await fixture();
   const git = (...args) =>

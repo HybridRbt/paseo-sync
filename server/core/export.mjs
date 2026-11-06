@@ -177,8 +177,7 @@ export async function exportProfile(ctx) {
       });
       continue;
     }
-    if (row.installation?.identity?.kind !== "git" || !row.path)
-      continue;
+    if (row.installation?.identity?.kind !== "git" || !row.path) continue;
     // sourceState shares the cleanliness notion of apply and baseline capture:
     // recorded patch applications stay clean, any other working-tree change or
     // a HEAD drift from provenance does not.
@@ -218,7 +217,7 @@ export async function exportProfile(ctx) {
     ...retained,
   ].sort((a, b) => a.id.localeCompare(b.id));
   const previous = await jsonOrNull(await safeFile(ctx.state, "baseline.json"));
-  if (loaded && previous) {
+  if (loaded && previous && !ctx.preferLocal) {
     const ids = new Set([
       ...loaded.manifest.plugins.map((p) => p.id),
       ...plugins.map((p) => p.id),
@@ -259,7 +258,7 @@ export async function exportProfile(ctx) {
       (s) => retainedIds.has(s.plugin) || carriedIds.has(s.plugin),
     ) ?? []),
   );
-  if (loaded && previous) {
+  if (loaded && previous && !ctx.preferLocal) {
     const names = new Set([
       ...loaded.settings.map((s) => s.file),
       ...settings.map((s) => s.file),

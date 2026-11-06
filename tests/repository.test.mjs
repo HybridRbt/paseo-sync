@@ -422,3 +422,56 @@ test("publishing preserves the previous baseline for skipped plugins so subseque
   assert.ok(clean.files.some((x) => x.path === "profile.json"));
 });
 
+test("publishPlan surfaces unapplied remote changes as conflicts by default and clears them with preferLocal", async () => {
+  const f = await fixture();
+  let p = await repository.publishPlan(f);
+  await repository.publish(f, p.approval, { push: false });
+
+  // Simulate baseline recording an older state while remote profile.json has an extra plugin
+  const manifest = JSON.parse(
+    await readFile(path.join(f.root, "profile.json"), "utf8"),
+  );
+  await writeJson(path.join(f.state, "baseline.json"), {
+    schemaVersion: 1,
+    profileHash: "old",
+    plugins: { demo: manifest.plugins[0] },
+    settings: {},
+    patches: {},
+  });
+  manifest.plugins.push({
+    id: "extra",
+    source: "npm:extra",
+    revision: "1.0.0",
+    enabled: true,
+  });
+  await writeJson(path.join(f.root, "profile.json"), manifest);
+  f.git("add", ".");
+  f.git("commit", "-qm", "remote extra plugin");
+
+  const blocked = await repository.publishPlan(f);
+  assert.equal(blocked.preferLocal, false);
+  assert.ok(blocked.conflicts.some((c) => /unapplied/i.test(c)));
+  await assert.rejects(
+    repository.publish(f, blocked.approval, { push: false }),
+    /unapplied/i,
+  );
+
+  const forced = await repository.publishPlan({ ...f, preferLocal: true });
+  assert.equal(forced.preferLocal, true);
+  assert.deepEqual(forced.conflicts, []);
+  await assert.rejects(
+    repository.publish(f, forced.approval, { push: false }),
+    /stale/i,
+  );
+  const committed = await repository.publish(
+    { ...f, preferLocal: true },
+    forced.approval,
+    { push: false },
+  );
+  assert.equal(committed.committed, true);
+  const updated = JSON.parse(
+    await readFile(path.join(f.root, "profile.json"), "utf8"),
+  );
+  assert.deepEqual(updated.plugins.map((x) => x.id), ["demo"]);
+});
+

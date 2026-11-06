@@ -133,7 +133,15 @@ export function createService({
     };
   }
   const seal = (ctx, kind, inner, backupId = "") =>
-    objectHash({ root: ctx.root, home: ctx.home, kind, inner, backupId });
+    objectHash({
+      root: ctx.root,
+      home: ctx.home,
+      kind,
+      inner,
+      backupId,
+      preferProfile: !!ctx.preferProfile,
+      preferLocal: !!ctx.preferLocal,
+    });
   async function preview(ctx, kind, backupId) {
     if (kind === "publish") {
       const p = await publishPlan(ctx);
@@ -214,7 +222,11 @@ export function createService({
       await phase("git-fetch-and-fast-forward");
       return prepareRepository(c.s.checkout, c.s.repositoryUrl);
     }
-    const ctx = await context(c);
+    const ctx = {
+      ...(await context(c)),
+      preferProfile: Boolean(input.preferProfile),
+      preferLocal: Boolean(input.preferLocal),
+    };
     if (input.kind === "inspect")
       return {
         host: os.hostname(),
