@@ -86,8 +86,10 @@ const english = {
   已复制路径: "Path copied",
   "复制失败：{error}，路径已显示在上方，可手动选中复制。":
     "Copy failed: {error}. The path is shown above; select and copy it manually.",
-  "打开失败：{error}": "Failed to open: {error}",
-  "当前平台不支持该快捷方式。": "Shortcut unsupported on this platform.",
+  "打开失败：{error}。可点击「复制路径」获取目录路径。":
+    "Failed to open: {error}. Use “Copy path” to get the checkout path.",
+  "当前平台不支持该快捷方式。可点击「复制路径」获取目录路径。":
+    "Shortcut unsupported on this platform. Use “Copy path” to get the checkout path.",
   未知错误: "Unknown error",
   "改动文件：{files}": "Changed files: {files}",
   "配置仓库沿用该插件已发布的版本。":
