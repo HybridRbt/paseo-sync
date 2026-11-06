@@ -1,14 +1,22 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdir } from "node:fs/promises";
+import path from "node:path";
 import {
   safeFile,
   jsonOrNull,
   bytesOrNull,
   writeJson,
+  atomicWrite,
   same,
   digest,
+  privateRoot,
 } from "./files.mjs";
+import {
+  packPluginDirectory,
+  resolveBundleArchive,
+  attachPatchOriginalBytes,
+} from "./bundle.mjs";
 import {
   isPortablePlugin,
   snapshotPlugin,
@@ -59,6 +67,7 @@ export async function assertRepositoryReady(root) {
 }
 export async function exportProfile(ctx) {
   await assertRepositoryReady(ctx.root);
+  if (ctx.state) await privateRoot(ctx.state);
   const old = await jsonOrNull(await safeFile(ctx.root, "profile.json"));
   const loaded = old ? await loadProfile(ctx.root) : null;
   const rows = (await ctx.adapter.list()).filter(
@@ -86,7 +95,111 @@ export async function exportProfile(ctx) {
   // published entry stays as the repository has it, and an unpublished one is
   // left out of this export.
   const skipped = [];
+  const bundled = new Map();
   for (const row of rows) {
+    if (row.installation?.identity?.kind === "directory" && row.path) {
+      const patchSpecs = (
+        loaded?.patches
+          ?.filter((b) => b.plugin === row.id)
+          .flatMap((b) => b.data?.files ?? []) ?? []
+      ).map((f) => ({ ...f }));
+      const existing = loaded?.manifest.plugins.find((p) => p.id === row.id);
+      const target =
+        existing && existing.source?.startsWith("bundle:")
+          ? existing
+          : {
+              id: row.id,
+              source: `bundle:bundles/${row.id}.tar.gz`,
+              revision:
+                existing?.revision ??
+                loaded?.patches.find((b) => b.plugin === row.id)?.data?.revision,
+            };
+      if (patchSpecs.length > 0 && target?.revision) {
+        await attachPatchOriginalBytes(ctx, target, patchSpecs);
+      }
+      if (isPortablePlugin(row)) {
+        // Installed bundle plugin with a valid marker
+        const state = await sourceState(row, loaded ?? { patches: [] });
+        if (state && !state.clean) {
+          skipped.push(
+            state.head === (row.installation.currentRevision ?? state.head)
+              ? {
+                  plugin: row.id,
+                  reason: "local-source-changes",
+                  files: state.changed,
+                }
+              : {
+                  plugin: row.id,
+                  reason: "head-differs",
+                  head: state.head,
+                  revision: row.installation.currentRevision,
+                },
+          );
+          continue;
+        }
+        const snap = snapshotPlugin(row);
+        const relPath = snap.source.startsWith("bundle:")
+          ? snap.source.slice(7)
+          : `bundles/${row.id}.tar.gz`;
+        const archiveBuffer = await resolveBundleArchive(
+          ctx,
+          snap,
+          row.path,
+          patchSpecs,
+        );
+        if (!archiveBuffer) {
+          skipped.push({
+            plugin: row.id,
+            reason: "untracked",
+          });
+          continue;
+        }
+        bundled.set(row.id, {
+          descriptor: snap,
+          buffer: archiveBuffer,
+          relPath,
+        });
+        continue;
+      } else {
+        // Unbundled directory checkout without marker
+        try {
+          const manifest = await jsonOrNull(
+            await safeFile(row.path, "paseo-plugin.json"),
+          );
+          if (!manifest) throw new Error("Missing paseo-plugin.json");
+          const packed = await packPluginDirectory(row.path, {
+            patches: patchSpecs,
+          });
+          const descriptor = {
+            id: row.id,
+            source: `bundle:bundles/${row.id}.tar.gz`,
+            revision: packed.sha256,
+            enabled: row.enabled,
+          };
+          if (ctx.state) {
+            const cachedFile = path.join(
+              ctx.state,
+              "bundles",
+              `${row.id}-${packed.sha256}.tar.gz`,
+            );
+            await mkdir(path.dirname(cachedFile), { recursive: true });
+            await atomicWrite(cachedFile, packed.buffer);
+          }
+          bundled.set(row.id, {
+            descriptor,
+            buffer: packed.buffer,
+            relPath: `bundles/${row.id}.tar.gz`,
+          });
+          continue;
+        } catch {
+          skipped.push({
+            plugin: row.id,
+            reason: "untracked",
+          });
+          continue;
+        }
+      }
+    }
     if (!isPortablePlugin(row)) {
       skipped.push({
         plugin: row.id,
@@ -94,14 +207,14 @@ export async function exportProfile(ctx) {
       });
       continue;
     }
-    if (row.installation?.identity.kind !== "git" || !row.path) continue;
+    if (row.installation?.identity?.kind !== "git" || !row.path) continue;
     // sourceState shares the cleanliness notion of apply and baseline capture:
     // recorded patch applications stay clean, any other working-tree change or
     // a HEAD drift from provenance does not.
     const state = await sourceState(row, loaded ?? { patches: [] });
-    if (state.clean) continue;
+    if (!state || state.clean) continue;
     skipped.push(
-      state.head === row.installation.currentRevision
+      state.head === (row.installation.currentRevision ?? state.head)
         ? {
             plugin: row.id,
             reason: "local-source-changes",
@@ -126,7 +239,10 @@ export async function exportProfile(ctx) {
   }
   const carriedIds = new Set(carried.map((p) => p.id));
   const plugins = [
-    ...rows.filter((r) => !skippedIds.has(r.id)).map(snapshotPlugin),
+    ...rows
+      .filter((r) => !skippedIds.has(r.id) && !bundled.has(r.id))
+      .map(snapshotPlugin),
+    ...[...bundled.values()].map((b) => b.descriptor),
     ...carried,
     ...retained,
   ].sort((a, b) => a.id.localeCompare(b.id));
@@ -232,6 +348,8 @@ export async function exportProfile(ctx) {
     patches,
   });
   // Every input is validated before the first repository write.
+  for (const b of bundled.values())
+    await atomicWrite(await safeFile(ctx.root, b.relPath), b.buffer);
   for (const s of settings)
     await writeJson(await safeFile(ctx.root, s.file), s.data);
   await writeJson(await safeFile(ctx.root, "profile.json"), manifest);

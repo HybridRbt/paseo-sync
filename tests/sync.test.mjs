@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { digest, writeJson } from "../server/core/files.mjs";
+import { packPluginDirectory } from "../server/core/bundle.mjs";
 import { loadProfile } from "../server/core/profile.mjs";
 import {
   buildPlan,
@@ -73,23 +74,33 @@ async function fixture(t, { installed = false, patch = false } = {}) {
     if (rows.some((x) => x.id === p.id))
       throw new Error("Plugin ID already configured");
     calls.push(["install", p.id, p.revision]);
-    const dir = path.join(home, "plugins", p.id, p.revision);
-    await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, "index.client.tsx"), 'icon="Github"');
+    const isDir = path.isAbsolute(p.source);
+    const dir = isDir ? p.source : path.join(home, "plugins", p.id, p.revision);
+    if (!isDir) {
+      await mkdir(dir, { recursive: true });
+      await writeFile(path.join(dir, "index.client.tsx"), 'icon="Github"');
+    }
     rows = rows.filter((x) => x.id !== p.id);
     rows.push({
       id: p.id,
       path: dir,
       enabled: true,
       status: "running",
-      installation: {
-        identity: {
-          kind: "npm",
-          packageName: p.source.slice(4),
-          pluginPath: ".",
-        },
-        currentRevision: p.revision,
-      },
+      installation: isDir
+        ? {
+            identity: {
+              kind: "directory",
+              path: dir,
+            },
+          }
+        : {
+            identity: {
+              kind: "npm",
+              packageName: p.source.slice(4),
+              pluginPath: ".",
+            },
+            currentRevision: p.revision,
+          },
     });
   }
   const adapter = {
@@ -1577,6 +1588,359 @@ test("restore never rolls back external settings changes for a plugin skipped by
   assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), external);
 });
 
+test("applies and updates offline bundle plugins idempotently", async (t) => {
+  const f = await fixture(t);
+  const bundleSourceDir = path.join(f.home, "tool-source");
+  await mkdir(bundleSourceDir, { recursive: true });
+  await writeFile(
+    path.join(bundleSourceDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "my-tool", name: "My Tool" }),
+  );
+  await writeFile(
+    path.join(bundleSourceDir, "index.js"),
+    "console.log('version 1');",
+  );
+  const packedV1 = await packPluginDirectory(bundleSourceDir);
+  const bundleFile = path.join(f.root, "bundles/my-tool.tar.gz");
+  await mkdir(path.dirname(bundleFile), { recursive: true });
+  await writeFile(bundleFile, packedV1.buffer);
+
+  f.manifest.plugins.push({
+    id: "my-tool",
+    source: "bundle:bundles/my-tool.tar.gz",
+    revision: packedV1.sha256,
+    enabled: true,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  // 1. Build plan should identify install action
+  const plan1 = await buildPlan(f.ctx);
+  const toolChange = plan1.changes.find((c) => c.plugin === "my-tool");
+  assert.ok(toolChange, "Plan should have change for my-tool");
+  assert.deepEqual(toolChange.actions, ["install"]);
+
+  // 2. Apply plan
+  const result1 = await applyPlan(f.ctx, plan1.approval);
+  assert.equal(result1.changed, true);
+
+  // Verify unpacked files
+  const installedDir = path.join(f.home, "local-plugins/my-tool");
+  assert.equal(
+    await readFile(path.join(installedDir, "index.js"), "utf8"),
+    "console.log('version 1');",
+  );
+  const meta1 = JSON.parse(
+    await readFile(path.join(installedDir, ".paseo-sync-bundle.json"), "utf8"),
+  );
+  assert.equal(meta1.source, "bundle:bundles/my-tool.tar.gz");
+  assert.equal(meta1.revision, packedV1.sha256);
+
+  // 3. Second plan should be idempotent
+  const plan2 = await buildPlan(f.ctx);
+  assert.equal(plan2.changes.length, 0);
+
+  // 4. Update bundle to version 2
+  await writeFile(
+    path.join(bundleSourceDir, "index.js"),
+    "console.log('version 2');",
+  );
+  const packedV2 = await packPluginDirectory(bundleSourceDir);
+  await writeFile(bundleFile, packedV2.buffer);
+
+  const manifestTarget = f.manifest.plugins.find((p) => p.id === "my-tool");
+  manifestTarget.revision = packedV2.sha256;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  const plan3 = await buildPlan(f.ctx);
+  const updateChange = plan3.changes.find((c) => c.plugin === "my-tool");
+  assert.ok(updateChange, "Plan should have change for my-tool update");
+  assert.deepEqual(updateChange.actions, ["update"]);
+
+  const result2 = await applyPlan(f.ctx, plan3.approval);
+  assert.equal(result2.changed, true);
+  assert.equal(
+    await readFile(path.join(installedDir, "index.js"), "utf8"),
+    "console.log('version 2');",
+  );
+  const meta2 = JSON.parse(
+    await readFile(path.join(installedDir, ".paseo-sync-bundle.json"), "utf8"),
+  );
+  assert.equal(meta2.revision, packedV2.sha256);
+
+  // 5. Restore backup from update rolls back V2 to V1 from cached bundle bytes
+  const restorePreview = await restorePlan(f.ctx, result2.backupId);
+  assert.equal(restorePreview.conflicts.length, 0);
+  assert.equal(restorePreview.currentChangedSinceBackup, false);
+  await restore(f.ctx, result2.backupId, restorePreview.approval);
+  assert.equal(
+    await readFile(path.join(installedDir, "index.js"), "utf8"),
+    "console.log('version 1');",
+  );
+  const metaRestored = JSON.parse(
+    await readFile(path.join(installedDir, ".paseo-sync-bundle.json"), "utf8"),
+  );
+  assert.equal(metaRestored.revision, packedV1.sha256);
+});
+
+test("detects edits to installed bundle plugins and skips destructive update", async (t) => {
+  const f = await fixture(t);
+  const bundleSourceDir = path.join(f.home, "tool-source");
+  await mkdir(bundleSourceDir, { recursive: true });
+  await writeFile(
+    path.join(bundleSourceDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "my-tool", name: "My Tool" }),
+  );
+  await writeFile(path.join(bundleSourceDir, "index.js"), "v1;");
+  const packedV1 = await packPluginDirectory(bundleSourceDir);
+  const bundleFile = path.join(f.root, "bundles/my-tool.tar.gz");
+  await mkdir(path.dirname(bundleFile), { recursive: true });
+  await writeFile(bundleFile, packedV1.buffer);
+
+  f.manifest.plugins.push({
+    id: "my-tool",
+    source: "bundle:bundles/my-tool.tar.gz",
+    revision: packedV1.sha256,
+    enabled: true,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  const plan1 = await buildPlan(f.ctx);
+  await applyPlan(f.ctx, plan1.approval);
+
+  const installedDir = path.join(f.home, "local-plugins/my-tool");
+
+  // 1. Edit installed file
+  await writeFile(path.join(installedDir, "index.js"), "locally edited v1;");
+
+  // Verify should report mismatch
+  const v = await verify(f.ctx);
+  assert.equal(v.configurationMatches, false);
+  assert.ok(v.differences.includes("source:my-tool"));
+
+  // 2. Profile updates to v2
+  await writeFile(path.join(bundleSourceDir, "index.js"), "v2;");
+  const packedV2 = await packPluginDirectory(bundleSourceDir);
+  await writeFile(bundleFile, packedV2.buffer);
+  f.manifest.plugins.find((p) => p.id === "my-tool").revision = packedV2.sha256;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  // 3. Plan should skip my-tool with local-source-changes instead of destroying edits
+  const plan2 = await buildPlan(f.ctx);
+  const toolSkip = plan2.skipped.find((s) => s.plugin === "my-tool");
+  assert.ok(toolSkip, "my-tool should be skipped");
+  assert.equal(toolSkip.reason, "local-source-changes");
+  assert.deepEqual(toolSkip.files, ["index.js"]);
+  assert.equal(plan2.changes.some((c) => c.plugin === "my-tool"), false);
+});
+
+test("refuses to update external unmanaged directory checkout with bundle", async (t) => {
+  const f = await fixture(t);
+  const externalDir = path.join(f.home, "external-checkout");
+  await mkdir(externalDir, { recursive: true });
+  await writeFile(
+    path.join(externalDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "ext-tool" }),
+  );
+  await writeFile(path.join(externalDir, "index.js"), "ext v1;");
+
+  // Install as external directory directly in adapter
+  await f.adapter.install({
+    id: "ext-tool",
+    source: externalDir,
+    revision: "local",
+    enabled: true,
+  });
+
+  const bundleFile = path.join(f.root, "bundles/ext-tool.tar.gz");
+  await mkdir(path.dirname(bundleFile), { recursive: true });
+  const remoteDir = path.join(f.home, "remote-tool-source");
+  await mkdir(remoteDir, { recursive: true });
+  await writeFile(
+    path.join(remoteDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "ext-tool" }),
+  );
+  await writeFile(path.join(remoteDir, "index.js"), "remote v2;");
+  const packedV2 = await packPluginDirectory(remoteDir);
+  await writeFile(bundleFile, packedV2.buffer);
+
+  f.manifest.plugins.push({
+    id: "ext-tool",
+    source: "bundle:bundles/ext-tool.tar.gz",
+    revision: packedV2.sha256,
+    enabled: true,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  // 1. Plan should skip external directory checkout
+  const plan = await buildPlan(f.ctx);
+  const extSkip = plan.skipped.find((s) => s.plugin === "ext-tool");
+  assert.ok(extSkip, "ext-tool should be skipped");
+  assert.equal(extSkip.reason, "local-source-changes");
+  assert.equal(extSkip.checkout, externalDir);
+
+  // 2. Direct attempt to update external directory with bundle must throw
+  const { installOrUpdateBundlePlugin } = await import("../server/core/sync.mjs");
+  await assert.rejects(
+    async () => {
+      await installOrUpdateBundlePlugin(f.ctx, f.manifest.plugins.find((p) => p.id === "ext-tool"), true, externalDir);
+    },
+    {
+      message: /Cannot update external plugin checkout with bundle/,
+    },
+  );
+});
+
+test("protects unmarked development directory inside local-plugins from destructive bundle updates and supports same-revision changes", async (t) => {
+  const f = await fixture(t);
+  const localDevDir = path.join(f.home, "local-plugins/dev-tool");
+  await mkdir(localDevDir, { recursive: true });
+  await writeFile(
+    path.join(localDevDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "dev-tool" }),
+  );
+  await writeFile(path.join(localDevDir, "index.js"), "dev v1;");
+  // Ignored local secret that is excluded from bundle packing but exists on disk
+  await writeFile(path.join(localDevDir, ".env"), "SECRET_TOKEN=keep-me");
+
+  // Pack v1 from the same source so revision matches
+  const packedV1 = await packPluginDirectory(localDevDir);
+  const bundleFile = path.join(f.root, "bundles/dev-tool.tar.gz");
+  await mkdir(path.dirname(bundleFile), { recursive: true });
+  await writeFile(bundleFile, packedV1.buffer);
+
+  // Register as an unmarked directory plugin (no .paseo-sync-bundle.json on disk)
+  await f.adapter.install({
+    id: "dev-tool",
+    source: localDevDir,
+    revision: "local",
+    enabled: true,
+  });
+
+  // 1. Same-revision disable change on unmarked directory plugin must succeed through buildPlan -> applyPlan -> restore
+  f.manifest.plugins.push({
+    id: "dev-tool",
+    source: "bundle:bundles/dev-tool.tar.gz",
+    revision: packedV1.sha256,
+    enabled: false,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  const planDisable = await buildPlan(f.ctx);
+  assert.deepEqual(planDisable.conflicts, []);
+  const disableChange = planDisable.changes.find((c) => c.plugin === "dev-tool");
+  assert.ok(disableChange, "Should plan disable for same-revision unmarked directory plugin");
+  assert.deepEqual(disableChange.actions, ["disable"]);
+
+  const appliedDisable = await applyPlan(f.ctx, planDisable.approval);
+  assert.equal(appliedDisable.changed, true);
+  assert.equal(appliedDisable.verification.configurationMatches, true);
+  assert.equal((await f.adapter.list()).find((p) => p.id === "dev-tool").enabled, false);
+  // .env must still be intact
+  assert.equal(await readFile(path.join(localDevDir, ".env"), "utf8"), "SECRET_TOKEN=keep-me");
+
+  const undoDisable = await restorePlan(f.ctx, appliedDisable.backupId);
+  assert.deepEqual(undoDisable.conflicts, []);
+  await restore(f.ctx, appliedDisable.backupId, undoDisable.approval);
+  assert.equal((await f.adapter.list()).find((p) => p.id === "dev-tool").enabled, true);
+
+  // 2. Now update bundle in profile to v2 while localDevDir remains an unmarked checkout
+  const remoteDir = path.join(f.home, "remote-dev-tool");
+  await mkdir(remoteDir, { recursive: true });
+  await writeFile(
+    path.join(remoteDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "dev-tool" }),
+  );
+  await writeFile(path.join(remoteDir, "index.js"), "remote v2;");
+  const packedV2 = await packPluginDirectory(remoteDir);
+  await writeFile(bundleFile, packedV2.buffer);
+
+  const targetEntry = f.manifest.plugins.find((p) => p.id === "dev-tool");
+  targetEntry.revision = packedV2.sha256;
+  targetEntry.enabled = true;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  // buildPlan must skip dev-tool rather than scheduling a destructive update
+  const planUpdate = await buildPlan(f.ctx);
+  const devSkip = planUpdate.skipped.find((s) => s.plugin === "dev-tool");
+  assert.ok(devSkip, "unmarked directory in local-plugins should be skipped on revision change");
+  assert.equal(devSkip.reason, "local-source-changes");
+  assert.equal(devSkip.checkout, localDevDir);
+  assert.equal(planUpdate.changes.some((c) => c.plugin === "dev-tool"), false);
+
+  // Direct call to installOrUpdateBundlePlugin must also refuse to wipe unmarked localDevDir
+  const { installOrUpdateBundlePlugin } = await import("../server/core/sync.mjs");
+  await assert.rejects(
+    async () => {
+      await installOrUpdateBundlePlugin(f.ctx, targetEntry, true, localDevDir);
+    },
+    /Cannot (?:update|overwrite) unmarked plugin directory with bundle/,
+  );
+  assert.equal(await readFile(path.join(localDevDir, ".env"), "utf8"), "SECRET_TOKEN=keep-me");
+});
+
+test("staged bundle extraction preserves existing installation and allows rollback when archive extraction fails", async (t) => {
+  const f = await fixture(t);
+  const bundleSourceDir = path.join(f.home, "stage-tool-src");
+  await mkdir(bundleSourceDir, { recursive: true });
+  await writeFile(
+    path.join(bundleSourceDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "stage-tool" }),
+  );
+  await writeFile(path.join(bundleSourceDir, "index.js"), "v1-working;");
+  const packedV1 = await packPluginDirectory(bundleSourceDir);
+  const bundleFile = path.join(f.root, "bundles/stage-tool.tar.gz");
+  await mkdir(path.dirname(bundleFile), { recursive: true });
+  await writeFile(bundleFile, packedV1.buffer);
+
+  f.manifest.plugins.push({
+    id: "stage-tool",
+    source: "bundle:bundles/stage-tool.tar.gz",
+    revision: packedV1.sha256,
+    enabled: true,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  // Install V1
+  const plan1 = await buildPlan(f.ctx);
+  await applyPlan(f.ctx, plan1.approval);
+  const installedDir = path.join(f.home, "local-plugins/stage-tool");
+  assert.equal(await readFile(path.join(installedDir, "index.js"), "utf8"), "v1-working;");
+
+  // Replace bundle archive with invalid gzip bytes whose sha256 matches target.revision
+  const { createHash } = await import("node:crypto");
+  const corruptBytes = Buffer.from("not-a-valid-gzip-archive");
+  const corruptSha = createHash("sha256").update(corruptBytes).digest("hex");
+  await writeFile(bundleFile, corruptBytes);
+  f.manifest.plugins.find((p) => p.id === "stage-tool").revision = corruptSha;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  const plan2 = await buildPlan(f.ctx);
+  let failedBackupId = null;
+  await assert.rejects(
+    async () => {
+      await applyPlan(f.ctx, plan2.approval);
+    },
+    (err) => {
+      failedBackupId = err.backupId;
+      return Boolean(failedBackupId);
+    },
+  );
+
+  // Working V1 installation and its bundle marker must remain intact
+  assert.equal(await readFile(path.join(installedDir, "index.js"), "utf8"), "v1-working;");
+  const marker = JSON.parse(
+    await readFile(path.join(installedDir, ".paseo-sync-bundle.json"), "utf8"),
+  );
+  assert.equal(marker.revision, packedV1.sha256);
+
+  // Rollback via restorePlan + restore must succeed cleanly
+  const restorePreview = await restorePlan(f.ctx, failedBackupId);
+  assert.deepEqual(restorePreview.conflicts, []);
+  await restore(f.ctx, failedBackupId, restorePreview.approval);
+  assert.equal(await readFile(path.join(installedDir, "index.js"), "utf8"), "v1-working;");
+  assert.equal((await f.adapter.list()).find((p) => p.id === "stage-tool").enabled, true);
+});
+
 test("preferProfile skips unsupported registry version transitions as disclosed skips while applying other plugins", async (t) => {
   const f = await fixture(t, { installed: true });
   // Initial sync to establish baseline
@@ -1710,4 +2074,133 @@ test("restore discloses an unidentifiable backup entry instead of crashing on a 
   // runs for it and its already-applied settings stay in place.
   assert.deepEqual(f.calls, []);
   assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), f.target);
+});
+
+test("unmarked directory plugin with recorded source patch synthesizes unpatched base revision across apply, re-plan, and restore", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "paseo-unmarked-patch-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repo = path.join(root, "repo");
+  const home = path.join(root, "home");
+  const state = path.join(root, "state");
+  const pluginDir = path.join(home, "local-plugins", "patched-bundle");
+  await mkdir(path.join(repo, "bundles"), { recursive: true });
+  await mkdir(path.join(repo, "patches"), { recursive: true });
+  await mkdir(pluginDir, { recursive: true });
+  await mkdir(state, { recursive: true });
+
+  const unpatchedCode = 'export const mode = "default";\n';
+  const patchedCode = 'export const mode = "patched";\n';
+  await writeFile(
+    path.join(pluginDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "patched-bundle", name: "Patched Bundle" }),
+  );
+  await writeFile(path.join(pluginDir, "index.js"), unpatchedCode);
+
+  const { packPluginDirectory } = await import("../server/core/bundle.mjs");
+  const packed = await packPluginDirectory(pluginDir);
+  await writeFile(
+    path.join(repo, "bundles", "patched-bundle.tar.gz"),
+    packed.buffer,
+  );
+  await writeFile(
+    path.join(repo, "patches", "patched-bundle.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        plugin: "patched-bundle",
+        revision: packed.sha256,
+        files: [
+          {
+            path: "index.js",
+            beforeSha256: digest(unpatchedCode),
+            afterSha256: digest(patchedCode),
+            find: '"default"',
+            replace: '"patched"',
+            count: 1,
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  await writeFile(
+    path.join(repo, "profile.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        plugins: [
+          {
+            id: "patched-bundle",
+            source: "bundle:bundles/patched-bundle.tar.gz",
+            revision: packed.sha256,
+            enabled: true,
+          },
+        ],
+        settings: [],
+        patches: [
+          {
+            plugin: "patched-bundle",
+            file: "patches/patched-bundle.json",
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  await writeFile(
+    path.join(home, "config.json"),
+    JSON.stringify({ pluginsEnabled: true }, null, 2),
+  );
+
+  let enabled = true;
+  const adapter = {
+    async list() {
+      return [
+        {
+          id: "patched-bundle",
+          enabled,
+          status: "running",
+          path: pluginDir,
+          installation: {
+            identity: { kind: "directory", path: pluginDir },
+          },
+        },
+      ];
+    },
+    async install() {},
+    async update() {},
+    async reload() {},
+    async act(action) {
+      if (action === "enable") enabled = true;
+      if (action === "disable") enabled = false;
+    },
+  };
+  const ctx = { root: repo, home, state, adapter };
+
+  const plan1 = await buildPlan(ctx);
+  assert.deepEqual(plan1.skipped, []);
+  assert.equal(plan1.changes.length, 1);
+  assert.deepEqual(plan1.changes[0].actions, ["patch"]);
+
+  const applied = await applyPlan(ctx, plan1.approval);
+  assert.equal(applied.changed, true);
+  assert.equal(applied.verification.configurationMatches, true);
+  assert.equal(await readFile(path.join(pluginDir, "index.js"), "utf8"), patchedCode);
+
+  const plan2 = await buildPlan(ctx);
+  assert.deepEqual(plan2.skipped, []);
+  assert.deepEqual(plan2.changes, []);
+
+  const rPlan = await restorePlan(ctx, applied.backupId);
+  assert.equal(rPlan.currentChangedSinceBackup, false);
+  assert.deepEqual(rPlan.conflicts, []);
+
+  const restored = await restore(ctx, applied.backupId, rPlan.approval);
+  assert.equal(restored.restored, true);
+  assert.equal(
+    await readFile(path.join(pluginDir, "index.js"), "utf8"),
+    unpatchedCode,
+  );
 });

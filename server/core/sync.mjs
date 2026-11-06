@@ -1,8 +1,10 @@
 import { sourceState } from "./source-state.mjs";
 import { acquireOperation } from "./lock.mjs";
 import { randomUUID } from "node:crypto";
-import { readFile, mkdir, rm, lstat } from "node:fs/promises";
+import { readFile, mkdir, rm, lstat, writeFile, rename } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 import {
   safeFile,
   bytesOrNull,
@@ -21,6 +23,13 @@ import {
   patchText,
   validateSettings,
 } from "./profile.mjs";
+import {
+  unpackBundle,
+  packPluginDirectory,
+  attachPatchOriginalBytes,
+  BUNDLE_MARKER,
+  resolveBundleArchive,
+} from "./bundle.mjs";
 
 function skipMissingDisabled(ctx, current, target) {
   return (
@@ -116,15 +125,205 @@ async function installedFile(ctx, row, name) {
   if (!path.isAbsolute(row.path))
     throw new Error("Installed plugin path must be absolute");
   const relative = path.relative(ctx.home, row.path);
+  const segments = relative.split(path.sep);
   if (
     relative.startsWith("..") ||
     path.isAbsolute(relative) ||
-    !relative.split(path.sep).includes("plugins")
+    (!segments.includes("plugins") && !segments.includes("local-plugins"))
   )
     throw new Error(
       `Plugin path is outside local managed installations: ${row.id}`,
     );
-  return safeFile(ctx.home, `${relative.split(path.sep).join("/")}/${name}`);
+  return safeFile(ctx.home, `${segments.join("/")}/${name}`);
+}
+export function isManagedLocalPath(home, pluginPath) {
+  if (!pluginPath || !path.isAbsolute(pluginPath)) return false;
+  const rel = path.relative(path.join(home, "local-plugins"), pluginPath);
+  return !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+export async function hasBundleMarker(pluginPath) {
+  if (!pluginPath) return false;
+  try {
+    const raw = await bytesOrNull(path.join(pluginPath, BUNDLE_MARKER));
+    if (!raw) return false;
+    const meta = JSON.parse(raw.toString("utf8"));
+    return Boolean(meta?.source?.startsWith("bundle:") && meta?.revision);
+  } catch {
+    return false;
+  }
+}
+
+async function resolvePluginDescriptor(
+  row,
+  target,
+  profile = null,
+  ctx = null,
+) {
+  if (!row) return null;
+  try {
+    return snapshotPlugin(row);
+  } catch {}
+  if (
+    target?.source?.startsWith("bundle:") &&
+    row.installation?.identity?.kind === "directory" &&
+    row.path
+  ) {
+    try {
+      const patchSpecs = (
+        profile?.patches
+          ?.filter((b) => b.plugin === row.id)
+          .flatMap((b) => b.data?.files ?? []) ?? []
+      ).map((f) => ({ ...f }));
+      await attachPatchOriginalBytes(ctx, target, patchSpecs);
+      const packed = await packPluginDirectory(row.path, {
+        patches: patchSpecs,
+      });
+      return {
+        id: row.id,
+        source: target.source,
+        revision: packed.sha256,
+        enabled: row.enabled,
+      };
+    } catch {}
+  }
+  return null;
+}
+
+function bundleCacheFile(ctx, pluginId, revision) {
+  return path.join(ctx.state, "bundles", `${pluginId}-${revision}.tar.gz`);
+}
+
+async function getBundleArchive(ctx, target) {
+  return resolveBundleArchive(ctx, target);
+}
+
+async function cacheBundleArchive(ctx, pluginId, revision, buffer) {
+  if (!ctx.state) return;
+  const cachedFile = bundleCacheFile(ctx, pluginId, revision);
+  if (!(await bytesOrNull(cachedFile))) {
+    await mkdir(path.dirname(cachedFile), { recursive: true });
+    await atomicWrite(cachedFile, buffer);
+  }
+}
+
+export async function installOrUpdateBundlePlugin(
+  ctx,
+  target,
+  isUpdate = false,
+  existingPath = null,
+) {
+  const destDir =
+    isUpdate && existingPath && isManagedLocalPath(ctx.home, existingPath)
+      ? existingPath
+      : path.join(ctx.home, "local-plugins", target.id);
+
+  if (isUpdate) {
+    if (!existingPath || !isManagedLocalPath(ctx.home, existingPath)) {
+      throw new Error(
+        `Cannot update external plugin checkout with bundle: ${target.id} (${existingPath})`,
+      );
+    }
+    if (!(await hasBundleMarker(existingPath))) {
+      throw new Error(
+        `Cannot overwrite unmarked plugin directory with bundle: ${target.id} (${existingPath})`,
+      );
+    }
+  } else if (existsSync(destDir) && !(await hasBundleMarker(destDir))) {
+    throw new Error(
+      `Cannot overwrite unmarked plugin directory with bundle: ${target.id} (${destDir})`,
+    );
+  }
+
+  // Preserve previous bundle archive before replacing it so restore can roll back (Review #1)
+  if (isUpdate && existingPath && isManagedLocalPath(ctx.home, existingPath)) {
+    try {
+      const metaFile = path.join(existingPath, BUNDLE_MARKER);
+      const rawMeta = await bytesOrNull(metaFile);
+      if (rawMeta) {
+        const meta = JSON.parse(rawMeta.toString("utf8"));
+        if (meta.revision) {
+          const prevCacheFile = bundleCacheFile(ctx, target.id, meta.revision);
+          if (!(await bytesOrNull(prevCacheFile))) {
+            const packed = await packPluginDirectory(existingPath);
+            if (packed.sha256 === meta.revision) {
+              await cacheBundleArchive(ctx, target.id, meta.revision, packed.buffer);
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const raw = await getBundleArchive(ctx, target);
+  if (!raw) {
+    throw new Error(
+      `Bundle archive not found or hash mismatch for ${target.id}: expected ${target.revision}`,
+    );
+  }
+
+  await mkdir(path.dirname(destDir), { recursive: true });
+  const stageDir = path.join(
+    path.dirname(destDir),
+    `.${path.basename(destDir)}.stage-${randomUUID()}`,
+  );
+  try {
+    const unpacked = await unpackBundle(raw, stageDir);
+    await writeFile(
+      path.join(stageDir, BUNDLE_MARKER),
+      JSON.stringify(
+        {
+          source: target.source,
+          revision: target.revision,
+          files: unpacked.files,
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+  } catch (err) {
+    await rm(stageDir, { recursive: true, force: true });
+    throw err;
+  }
+
+  const backupDir = existsSync(destDir)
+    ? path.join(
+        path.dirname(destDir),
+        `.${path.basename(destDir)}.bak-${randomUUID()}`,
+      )
+    : null;
+  if (backupDir) {
+    await rename(destDir, backupDir);
+  }
+  try {
+    await rename(stageDir, destDir);
+  } catch (err) {
+    await rm(stageDir, { recursive: true, force: true });
+    if (backupDir && existsSync(backupDir) && !existsSync(destDir)) {
+      try {
+        await rename(backupDir, destDir);
+      } catch {}
+    }
+    throw err;
+  }
+  if (backupDir) {
+    await rm(backupDir, { recursive: true, force: true });
+  }
+  await cacheBundleArchive(ctx, target.id, target.revision, raw);
+
+  if (!isUpdate) {
+    await ctx.adapter.install({ ...target, source: destDir });
+  } else {
+    if (typeof ctx.adapter.reload === "function") {
+      await ctx.adapter.reload(target.id);
+    } else if (typeof ctx.adapter.act === "function") {
+      try {
+        await ctx.adapter.act("reload", target.id);
+      } catch {}
+    }
+  }
+  return destDir;
 }
 async function capture(ctx, profile) {
   const rows = await ctx.adapter.list();
@@ -135,14 +334,7 @@ async function capture(ctx, profile) {
     patches = {};
   for (const p of profile.manifest.plugins) {
     const row = byId.get(p.id);
-    let descriptor = null;
-    if (row) {
-      try {
-        descriptor = snapshotPlugin(row);
-      } catch {
-        descriptor = null;
-      }
-    }
+    const descriptor = await resolvePluginDescriptor(row, p, profile, ctx);
     plugins[p.id] = row
       ? {
           descriptor,
@@ -392,6 +584,25 @@ async function planData(ctx) {
             },
       );
       continue;
+    }
+    // An external or unmarked directory checkout must not be overwritten or
+    // converted into a bundle in local-plugins: skip it with its checkout
+    // disclosed, preserving the developer's working directory.
+    if (
+      currentPlugin?.path &&
+      target.source.startsWith("bundle:") &&
+      (!isManagedLocalPath(ctx.home, currentPlugin.path) ||
+        !(await hasBundleMarker(currentPlugin.path)))
+    ) {
+      if (now?.revision !== target.revision) {
+        skipped.push({
+          plugin: target.id,
+          reason: "local-source-changes",
+          checkout: currentPlugin.path,
+          files: [],
+        });
+        continue;
+      }
     }
     const sameVersion =
       now &&
@@ -703,7 +914,11 @@ export async function applyPlan(ctx, approval) {
           throw new Error(`Settings changed concurrently while stopping ${id}`);
       }
       if (change.actions.includes("install")) {
-        await ctx.adapter.install(target);
+        if (target.source.startsWith("bundle:")) {
+          await installOrUpdateBundlePlugin(ctx, target, false);
+        } else {
+          await ctx.adapter.install(target);
+        }
         const row = (await ctx.adapter.list()).find((x) => x.id === id);
         if (!row) throw new Error(`Install returned no plugin: ${id}`);
         if (row.enabled) await ctx.adapter.act("disable", id);
@@ -715,11 +930,17 @@ export async function applyPlan(ctx, approval) {
           !same(await sourceState(latest, profile), before.sourceState ?? null)
         )
           throw new Error(`Local source changed while stopping ${id}`);
-        await ctx.adapter.update(target);
+        if (target.source.startsWith("bundle:")) {
+          await installOrUpdateBundlePlugin(ctx, target, true, latest.path);
+        } else {
+          await ctx.adapter.update(target);
+        }
       }
       const row = (await ctx.adapter.list()).find((x) => x.id === id);
       if (!row) throw new Error(`Missing plugin after install: ${id}`);
-      const installed = snapshotPlugin(row);
+      const installed =
+        (await resolvePluginDescriptor(row, target, profile, ctx)) ??
+        snapshotPlugin(row);
       if (
         !same(
           { ...pluginIdentity(installed), enabled: target.enabled },
@@ -857,6 +1078,14 @@ export async function restorePlan(ctx, id) {
         ctx.selfIds?.includes(plugin) ? plugin : ctx.selfId,
       );
       if (conflict) conflicts.push(conflict);
+      if (before.descriptor?.source?.startsWith("bundle:")) {
+        const archive = await getBundleArchive(ctx, before.descriptor);
+        if (!archive) {
+          conflicts.push(
+            `Previous bundle archive for ${plugin} (${before.descriptor.revision.slice(0, 7)}) is not available in local cache or repository; cannot restore.`,
+          );
+        }
+      }
     }
   }
   const skippedIds = new Set(skipped.map((s) => s.plugin));
@@ -1003,18 +1232,35 @@ export async function restore(ctx, id, approval) {
         }
         continue;
       }
+      const currentDescriptor = row
+        ? ((await resolvePluginDescriptor(
+            row,
+            before.descriptor,
+            b.profile,
+            ctx,
+          )) ?? snapshotPlugin(row))
+        : null;
       if (
         !row ||
         !same(
           {
-            ...pluginIdentity(snapshotPlugin(row)),
+            ...pluginIdentity(currentDescriptor),
             enabled: before.descriptor.enabled,
           },
           pluginIdentity(before.descriptor),
         )
       ) {
-        if (row) await ctx.adapter.update(before.descriptor);
-        else await ctx.adapter.install(before.descriptor);
+        if (before.descriptor.source.startsWith("bundle:")) {
+          await installOrUpdateBundlePlugin(
+            ctx,
+            before.descriptor,
+            !!row,
+            row?.path,
+          );
+        } else {
+          if (row) await ctx.adapter.update(before.descriptor);
+          else await ctx.adapter.install(before.descriptor);
+        }
         row = (await ctx.adapter.list()).find((x) => x.id === target.id);
         if (row?.enabled) await ctx.adapter.act("disable", target.id);
         await assertCurrentSettings(target.id);

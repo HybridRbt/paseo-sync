@@ -110,9 +110,10 @@ export function progressFromJob(progress, kind, checkout) {
     next.applied = true;
     next.cafe = true;
   }
-  if (kind === "publish") {
-    next.applied = true;
-  }
+  // Publishing exports this host's configuration without gating on or
+  // applying Cafe exclusions, so it completes the configuration-direction
+  // step only and leaves a pending Cafe step pending.
+  if (kind === "publish") next.applied = true;
   return turned(progress, next) ? next : progress;
 }
 

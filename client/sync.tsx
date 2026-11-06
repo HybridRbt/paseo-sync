@@ -21,6 +21,7 @@ import {
   renderDriftDisclosure,
   formatConflict,
 } from "./i18n.mjs";
+import { copyTextToClipboard } from "./clipboard.mjs";
 import { mergeDiscovery, editCheckout } from "../shared/onboarding.mjs";
 import {
   actionGate,
@@ -914,12 +915,12 @@ export function CheckoutShortcuts({
     target: "terminal" | "fileManager",
   ) => Promise<{ status: "opened" | "unsupported" | "failed"; error?: string }>;
 }) {
-  const [opening, setOpening] = useState<"terminal" | "fileManager" | null>(
-    null,
-  );
+  const [opening, setOpening] = useState<
+    "terminal" | "fileManager" | "copy" | null
+  >(null);
   const [status, setStatus] = useState<{
-    type: "terminal" | "fileManager";
-    status: "opened" | "unsupported" | "failed";
+    type: "terminal" | "fileManager" | "copy";
+    status: "opened" | "unsupported" | "failed" | "copied";
     error?: string;
   } | null>(null);
 
@@ -933,6 +934,26 @@ export function CheckoutShortcuts({
     } catch (e) {
       setStatus({
         type: target,
+        status: "failed",
+        error: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setOpening(null);
+    }
+  }
+
+  // Client-side copy only: unlike the open buttons it does not depend on the
+  // daemon host's desktop environment, so it stays usable on headless hosts.
+  async function handleCopyPath() {
+    if (opening) return;
+    setOpening("copy");
+    setStatus(null);
+    try {
+      await copyTextToClipboard(checkout);
+      setStatus({ type: "copy", status: "copied" });
+    } catch (e) {
+      setStatus({
+        type: "copy",
         status: "failed",
         error: e instanceof Error ? e.message : String(e),
       });
@@ -1001,6 +1022,23 @@ export function CheckoutShortcuts({
             {t("在文件管理器中打开")}
           </Text>
         </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={t("复制 {plugin} 源码目录路径", { plugin })}
+          disabled={Boolean(opening)}
+          style={{
+            paddingVertical: 4,
+            paddingHorizontal: 8,
+            borderRadius: 4,
+            borderWidth: 1,
+            borderColor: borderCol,
+            backgroundColor: bgCol,
+            opacity: opening === "copy" ? 0.6 : 1,
+          }}
+          onPress={() => void handleCopyPath()}
+        >
+          <Text style={{ fontSize: 12, color: fgCol }}>{t("复制路径")}</Text>
+        </Pressable>
       </View>
       {status ? (
         <Text
@@ -1009,22 +1047,28 @@ export function CheckoutShortcuts({
             fontSize: 12,
             paddingLeft: 4,
             color:
-              status.status === "opened"
+              status.status === "opened" || status.status === "copied"
                 ? successCol
                 : status.status === "failed"
                   ? dangerCol
                   : mutedCol,
           }}
         >
-          {status.status === "opened"
-            ? status.type === "terminal"
-              ? t("已打开终端")
-              : t("已在文件管理器中打开")
-            : status.status === "unsupported"
-              ? t("当前平台不支持该快捷方式。")
-              : t("打开失败：{error}", {
-                  error: status.error || t("未知错误"),
-                })}
+          {status.status === "copied"
+            ? t("已复制路径")
+            : status.status === "opened"
+              ? status.type === "terminal"
+                ? t("已打开终端")
+                : t("已在文件管理器中打开")
+              : status.status === "unsupported"
+                ? t("当前平台不支持该快捷方式。")
+                : status.type === "copy"
+                  ? t("复制失败：{error}，路径已显示在上方，可手动选中复制。", {
+                      error: status.error || t("未知错误"),
+                    })
+                  : t("打开失败：{error}", {
+                      error: status.error || t("未知错误"),
+                    })}
         </Text>
       ) : null}
     </View>
@@ -1068,8 +1112,8 @@ export function ResultSummary({
     changes?: {
       plugin: string;
       actions: string[];
-      from?: { revision: string } | null;
-      to?: { revision: string };
+      from?: { revision: string; source?: string } | null;
+      to?: { revision: string; source?: string };
       settings?: { document: string; before: unknown; after: unknown }[];
     }[];
     pushUrl?: string;
@@ -1292,11 +1336,18 @@ export function ResultSummary({
               </Text>
             </View>
           ) : (
-            <Text key={s.plugin} style={text}>
-              {t("跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。", {
-                plugin: s.plugin,
-              })}
-            </Text>
+            <View key={s.plugin} style={{ gap: 4 }}>
+              <Text selectable style={text}>
+                {t("跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。", {
+                  plugin: s.plugin,
+                })}
+              </Text>
+              <Text selectable style={text}>
+                {s.published
+                  ? t("配置仓库沿用该插件已发布的版本。")
+                  : t("该插件尚未发布过，本次不出现在配置中。")}
+              </Text>
+            </View>
           )
         ) : s.reason === "registry-version-transition" ? (
           <Text key={s.plugin} style={text}>
@@ -1316,33 +1367,48 @@ export function ResultSummary({
       {r.changes?.length === 0 ? (
         <Text style={text}>{t("配置一致，无需修改。")}</Text>
       ) : null}
-      {r.changes?.map((c) => (
-        <View key={c.plugin} style={{ gap: 4 }}>
-          <Text style={text}>
-            {c.plugin}：{c.from?.revision ?? t("未安装")} → {c.to?.revision} ·{" "}
-            {c.actions
-              .map(
-                (a) =>
-                  ({
-                    install: "安装",
-                    update: "切换版本",
-                    enable: "启用",
-                    disable: "停用",
-                    reload: "重载",
-                    patch: "应用补丁",
-                  })[a] ?? "更新设置",
-              )
-              .map((a) => t(a))
-              .join(", ")}
-          </Text>
-          {c.settings?.map((s) => (
-            <Text selectable key={s.document} style={text}>
-              {s.document}：{JSON.stringify(s.before)} →{" "}
-              {JSON.stringify(s.after)}
+      {r.changes?.map((c) => {
+        const isBundle =
+          c.to?.source?.startsWith("bundle:") ||
+          c.from?.source?.startsWith("bundle:");
+        const fromRev = c.from?.revision
+          ? isBundle && c.from.revision.length === 64
+            ? c.from.revision.slice(0, 7)
+            : c.from.revision
+          : t("未安装");
+        const toRev =
+          isBundle && c.to?.revision && c.to.revision.length === 64
+            ? c.to.revision.slice(0, 7)
+            : c.to?.revision;
+        return (
+          <View key={c.plugin} style={{ gap: 4 }}>
+            <Text style={text}>
+              {c.plugin}
+              {isBundle ? ` [${t("离线归档")}]` : ""}：{fromRev} → {toRev} ·{" "}
+              {c.actions
+                .map(
+                  (a) =>
+                    ({
+                      install: "安装",
+                      update: "切换版本",
+                      enable: "启用",
+                      disable: "停用",
+                      reload: "重载",
+                      patch: "应用补丁",
+                    })[a] ?? "更新设置",
+                )
+                .map((a) => t(a))
+                .join(", ")}
             </Text>
-          ))}
-        </View>
-      ))}
+            {c.settings?.map((s) => (
+              <Text selectable key={s.document} style={text}>
+                {s.document}：{JSON.stringify(s.before)} →{" "}
+                {JSON.stringify(s.after)}
+              </Text>
+            ))}
+          </View>
+        );
+      })}
       {r.files?.length === 0 ? (
         <Text style={text}>
           {t("导出内容没有变化；确认发布可推送尚未推送的提交。")}
@@ -1351,14 +1417,22 @@ export function ResultSummary({
       {r.files?.map((f) => (
         <View key={f.path} style={{ gap: 4 }}>
           <Text style={text}>{f.path}</Text>
-          <Text selectable style={text}>
-            {t("修改前：")}
-            {f.before ?? t("文件不存在")}
-          </Text>
-          <Text selectable style={text}>
-            {t("修改后：")}
-            {f.after}
-          </Text>
+          {f.path.endsWith(".tar.gz") ? (
+            <Text style={text}>
+              {f.before ? t("更新离线归档包") : t("新增离线归档包")}
+            </Text>
+          ) : (
+            <>
+              <Text selectable style={text}>
+                {t("修改前：")}
+                {f.before ?? t("文件不存在")}
+              </Text>
+              <Text selectable style={text}>
+                {t("修改后：")}
+                {f.after}
+              </Text>
+            </>
+          )}
         </View>
       ))}
       {r.missing ? (

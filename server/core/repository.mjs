@@ -128,6 +128,7 @@ async function exportSnapshot(ctx) {
         "profile.json",
         ...loaded.manifest.settings.map((x) => x.file),
         ...loaded.manifest.patches.map((x) => x.file),
+        ...(loaded.bundles?.map((x) => x.file) ?? []),
       ])
         await atomicWrite(
           await safeFile(temp, file),
@@ -156,20 +157,30 @@ async function exportSnapshot(ctx) {
     }
     const loaded = await loadProfile(temp);
     const files = [];
+    const _bytes = new Map();
     for (const file of [
       "profile.json",
       ...loaded.manifest.settings.map((x) => x.file),
       ...loaded.manifest.patches.map((x) => x.file),
+      ...(loaded.bundles?.map((x) => x.file) ?? []),
     ].sort()) {
       relativeName(file);
       const before = await bytesOrNull(await safeFile(ctx.root, file)),
         after = await bytesOrNull(await safeFile(temp, file));
-      if (!before?.equals(after))
+      if (!before?.equals(after)) {
+        const isBinary = file.endsWith(".tar.gz") || file.endsWith(".tgz");
+        _bytes.set(file, after);
         files.push({
           path: file,
-          before: before?.toString("utf8") ?? null,
-          after: after.toString("utf8"),
+          binary: isBinary || undefined,
+          before: isBinary
+            ? before
+              ? before.toString("base64")
+              : null
+            : before?.toString("utf8") ?? null,
+          after: isBinary ? after.toString("base64") : after.toString("utf8"),
         });
+      }
     }
     return {
       head,
@@ -188,6 +199,7 @@ async function exportSnapshot(ctx) {
         loaded,
         new Set(exported.skipped.map((s) => s.plugin)),
       ),
+      _bytes,
       approval: objectHash({
         head,
         origin,
@@ -204,7 +216,7 @@ async function exportSnapshot(ctx) {
   }
 }
 export async function publishPlan(ctx) {
-  const { _baseline, ...preview } = await exportSnapshot(ctx);
+  const { _baseline, _bytes, ...preview } = await exportSnapshot(ctx);
   return preview;
 }
 export async function publish(ctx, approval, { push = true } = {}) {
@@ -215,8 +227,12 @@ export async function publish(ctx, approval, { push = true } = {}) {
     if (push && !p.origin)
       throw new Error("Publishing requires an origin remote");
     if (p.files.length) {
-      for (const file of p.files)
-        await atomicWrite(await safeFile(ctx.root, file.path), file.after);
+      for (const file of p.files) {
+        const payload =
+          p._bytes?.get(file.path) ??
+          (file.binary ? Buffer.from(file.after, "base64") : file.after);
+        await atomicWrite(await safeFile(ctx.root, file.path), payload);
+      }
       const names = p.files.map((x) => x.path);
       await git(ctx.root, "add", "--", ...names);
       await git(

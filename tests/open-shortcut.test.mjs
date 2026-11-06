@@ -247,12 +247,101 @@ test("bilingual translations cover all checkout shortcut labels and feedback", a
       "当前平台不支持该快捷方式。",
     ],
     ["未知错误", "Unknown error", "未知错误"],
+    [
+      "跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。",
+      "Skipped my-plugin: local development or untracked plugin; its changes are not published this time.",
+      "跳过 my-plugin：本地开发或未受管插件，本次不发布它的变更。",
+      { plugin: "my-plugin" },
+    ],
+    ["离线归档", "Offline bundle", "离线归档"],
+    ["新增离线归档包", "Add offline bundle archive", "新增离线归档包"],
+    ["更新离线归档包", "Update offline bundle archive", "更新离线归档包"],
   ];
 
   for (const [key, expectedEn, expectedZh, params] of keys) {
     assert.equal(en(key, params), expectedEn);
     assert.equal(zh(key, params), expectedZh);
   }
+});
+
+test("bilingual translations cover copy path labels and feedback", async () => {
+  const { translator } = await import("../client/i18n.mjs");
+  const en = translator("en");
+  const zh = translator("zh");
+
+  const keys = [
+    ["复制路径", "Copy path", "复制路径"],
+    [
+      "复制 {plugin} 源码目录路径",
+      "Copy my-plugin source checkout path",
+      "复制 my-plugin 源码目录路径",
+      { plugin: "my-plugin" },
+    ],
+    ["已复制路径", "Path copied", "已复制路径"],
+    [
+      "复制失败：{error}，路径已显示在上方，可手动选中复制。",
+      "Copy failed: Clipboard unavailable. The path is shown above; select and copy it manually.",
+      "复制失败：Clipboard unavailable，路径已显示在上方，可手动选中复制。",
+      { error: "Clipboard unavailable" },
+    ],
+  ];
+
+  for (const [key, expectedEn, expectedZh, params] of keys) {
+    assert.equal(en(key, params), expectedEn);
+    assert.equal(zh(key, params), expectedZh);
+  }
+});
+
+test("copyTextToClipboard writes through the clipboard API and degrades gracefully", async () => {
+  const { copyTextToClipboard } = await import("../client/clipboard.mjs");
+
+  // Success path: an injected clipboard provider receives the path verbatim.
+  const written = [];
+  await copyTextToClipboard("/my/checkout", {
+    writeText: async (text) => {
+      written.push(text);
+    },
+  });
+  assert.deepEqual(written, ["/my/checkout"]);
+
+  // Default lookup resolves globalThis.navigator.clipboard when present.
+  const originalDescriptor = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "navigator",
+  );
+  const defaultWritten = [];
+  Object.defineProperty(globalThis, "navigator", {
+    value: {
+      clipboard: {
+        writeText: async (text) => {
+          defaultWritten.push(text);
+        },
+      },
+    },
+    configurable: true,
+  });
+  try {
+    await copyTextToClipboard("/default/checkout");
+    assert.deepEqual(defaultWritten, ["/default/checkout"]);
+  } finally {
+    Object.defineProperty(globalThis, "navigator", originalDescriptor);
+  }
+
+  // Missing clipboard (restricted webview, headless client) surfaces a
+  // readable error the UI can disclose next to the selectable path.
+  await assert.rejects(copyTextToClipboard("/my/checkout"), {
+    message: "Clipboard unavailable in this environment",
+  });
+
+  // Underlying writeText failures propagate for the UI to disclose.
+  await assert.rejects(
+    copyTextToClipboard("/my/checkout", {
+      writeText: async () => {
+        throw new Error("not allowed");
+      },
+    }),
+    { message: "not allowed" },
+  );
 });
 
 test("formatConflict and overwrite mode translations render bilingually", async () => {
