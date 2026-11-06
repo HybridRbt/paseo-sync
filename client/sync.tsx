@@ -1254,11 +1254,50 @@ export function ResultSummary({
             </View>
           )
         ) : s.reason === "untracked" ? (
-          <Text key={s.plugin} style={text}>
-            {t("跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。", {
-              plugin: s.plugin,
-            })}
-          </Text>
+          s.restore ? (
+            <Text key={s.plugin} style={text}>
+              {t(
+                "跳过 {plugin}：备份或本机插件缺少可识别的安装来源，本次恢复不改动该插件。",
+                { plugin: s.plugin },
+              )}
+            </Text>
+          ) : s.checkout !== undefined ? (
+            // Apply side: the untracked installation keeps its local state;
+            // the install directory and repair steps show how to converge.
+            <View key={s.plugin} style={{ gap: 4 }}>
+              <Text selectable style={text}>
+                {t("跳过 {plugin}：本地开发或未受管插件，本次不应用到本机。", {
+                  plugin: s.plugin,
+                })}
+              </Text>
+              <Text selectable style={text}>
+                {t("本机安装目录：{checkout}", { checkout: s.checkout })}
+              </Text>
+              {s.checkout ? (
+                <View style={{ paddingLeft: 8, paddingTop: 2 }}>
+                  <CheckoutShortcuts
+                    plugin={s.plugin}
+                    checkout={s.checkout}
+                    theme={theme}
+                    t={t}
+                    onOpen={onOpenCheckout}
+                  />
+                </View>
+              ) : null}
+              <Text selectable style={text}>
+                {t(
+                  "该插件本次保持本机现状，未被同步修改。请先核对其安装来源或移除该安装（如 paseo plugin uninstall {plugin}），再重新预览差异。",
+                  { plugin: s.plugin },
+                )}
+              </Text>
+            </View>
+          ) : (
+            <Text key={s.plugin} style={text}>
+              {t("跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。", {
+                plugin: s.plugin,
+              })}
+            </Text>
+          )
         ) : s.reason === "registry-version-transition" ? (
           <Text key={s.plugin} style={text}>
             {t(

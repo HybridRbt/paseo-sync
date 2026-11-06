@@ -356,6 +356,20 @@ async function planData(ctx) {
       skipped.push({ plugin: target.id, reason: "missing-disabled" });
       continue;
     }
+    // A profile target can collide with an untracked or local-development
+    // installation whose descriptor cannot be snapshotted. Presenting it as
+    // an absent plugin offered a conflict-free install whose confirmation
+    // crashed on the null descriptor, and whose failed capture stored unusable
+    // backups; disclose the installation (exactly like publishing does) and
+    // leave it untouched instead.
+    if (currentPlugin && !currentPlugin.descriptor) {
+      skipped.push({
+        plugin: target.id,
+        reason: "untracked",
+        checkout: currentPlugin.path,
+      });
+      continue;
+    }
     // Reconciling a dirty local Git source with the profile would destroy the
     // local edits (update replaces the whole checkout), so the plugin is
     // skipped with its dirtiness disclosed, exactly like publish, and
@@ -678,7 +692,7 @@ export async function applyPlan(ctx, approval) {
         before = current.plugins[id];
       const affectedSettings = profile.settings.filter((s) => s.plugin === id),
         bundle = profile.patches.find((x) => x.plugin === id);
-      if (before?.descriptor.enabled) await ctx.adapter.act("disable", id);
+      if (before?.descriptor?.enabled) await ctx.adapter.act("disable", id);
       // A client may have saved while disable was in flight. Compare exact bytes.
       for (const s of affectedSettings) {
         const raw = await bytesOrNull(await settingsFile(ctx, s));
@@ -801,6 +815,15 @@ export async function restorePlan(ctx, id) {
     );
   for (const [plugin, before] of Object.entries(b.before.plugins)) {
     const now = current.plugins[plugin];
+    // A failed or interrupted capture can leave the descriptor snapshot
+    // missing, on this host (an untracked or local-development installation
+    // shares the id) or in the backup itself. Restoring such an entry would
+    // disable or reinstall from an unidentifiable source; disclose it as
+    // untracked and leave it untouched instead of dereferencing null.
+    if ((now && !now.descriptor) || (before && !before.descriptor)) {
+      skipped.push({ plugin, reason: "untracked", restore: true });
+      continue;
+    }
     // Restoring reinstalls the pinned revision and rewrites patched files,
     // which would destroy uncommitted local edits. The dirty plugin keeps
     // its local state instead, disclosed with its files, checkout and

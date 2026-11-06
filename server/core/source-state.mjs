@@ -65,7 +65,10 @@ async function installBuildScope(row, top) {
 }
 
 export async function sourceState(row, profile) {
-  if (row.installation?.identity.kind !== "git") return null;
+  // The row exists but may carry broken installation metadata (an untracked
+  // or local-development install that snapshotPlugin rejects); tolerate it
+  // instead of throwing on the missing identity.
+  if (row.installation?.identity?.kind !== "git") return null;
   const head = await git(row.path, "rev-parse", "HEAD");
   const status = await gitRaw(
     row.path,

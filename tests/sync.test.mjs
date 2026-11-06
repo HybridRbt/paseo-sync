@@ -1646,3 +1646,68 @@ test("preferProfile skips unsupported registry version transitions as disclosed 
   });
 });
 
+test("an untracked installation sharing the target id is disclosed and skipped instead of crashing apply", async (t) => {
+  const f = await fixture(t, { installed: true });
+  const row = (await f.adapter.list())[0];
+  // The row exists but cannot be snapshotted: an untracked or local
+  // development installation without usable installation metadata. It must
+  // not be presented as an absent plugin (which offered a conflict-free
+  // install that crashed applyPlan on the null descriptor).
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {};
+    return rows;
+  };
+  const plan = await buildPlan(f.ctx);
+  assert.deepEqual(plan.skipped, [
+    { plugin: "better-paseo", reason: "untracked", checkout: row.path },
+  ]);
+  assert.deepEqual(plan.conflicts, []);
+  assert.deepEqual(plan.changes, []);
+  const { canConfirmPreview, translator } = await import("../client/i18n.mjs");
+  // The skip is only a disclosure: confirm stays armed.
+  assert.equal(canConfirmPreview({ ...plan, confirmKind: "apply" }), true);
+  for (const language of ["zh", "en"]) {
+    const line =
+      "跳过 {plugin}：本地开发或未受管插件，本次不应用到本机。";
+    const translated = translator(language)(line, { plugin: "better-paseo" });
+    assert.ok(translated.includes("better-paseo"));
+    assert.notEqual(translated, line);
+  }
+  const r = await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  assert.equal(r.changed, false);
+  assert.deepEqual(f.calls, []);
+});
+test("restore discloses an unidentifiable backup entry instead of crashing on a null descriptor", async (t) => {
+  const f = await fixture(t, { installed: true });
+  const r = await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  // A failed or interrupted capture used to store this plugin as a record
+  // with a null descriptor; restorePlan dereferenced it and crashed. Simulate
+  // that legacy shape and expect an untracked disclosure instead.
+  const file = path.join(f.state, "backups", r.backupId + ".json"),
+    b = JSON.parse(await readFile(file, "utf8"));
+  b.before.plugins["better-paseo"].descriptor = null;
+  await writeFile(file, JSON.stringify(b, null, 2));
+  const preview = await restorePlan(f.ctx, r.backupId);
+  assert.deepEqual(preview.conflicts, []);
+  assert.deepEqual(preview.skipped, [
+    { plugin: "better-paseo", reason: "untracked", restore: true },
+  ]);
+  const { canConfirmPreview, translator } = await import("../client/i18n.mjs");
+  assert.equal(canConfirmPreview({ ...preview, confirmKind: "restore" }), true);
+  for (const language of ["zh", "en"]) {
+    const line =
+      "跳过 {plugin}：备份或本机插件缺少可识别的安装来源，本次恢复不改动该插件。";
+    const translated = translator(language)(line, { plugin: "better-paseo" });
+    assert.ok(translated.includes("better-paseo"));
+    assert.notEqual(translated, line);
+  }
+  f.calls.length = 0;
+  const restored = await restore(f.ctx, r.backupId, preview.approval);
+  assert.equal(restored.restored, true);
+  // The unidentifiable installation is untouched: no adapter choreography
+  // runs for it and its already-applied settings stay in place.
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), f.target);
+});

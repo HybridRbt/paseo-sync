@@ -3,6 +3,14 @@ const english = {
     "Skip {plugin}: not installed on this host and disabled in the profile.",
   "跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。":
     "Skipped {plugin}: local development or untracked plugin; its changes are not published this time.",
+  "跳过 {plugin}：本地开发或未受管插件，本次不应用到本机。":
+    "Skipped {plugin}: local development or untracked plugin; it is not applied on this host.",
+  "本机安装目录：{checkout}":
+    "Installed at: {checkout}",
+  "该插件本次保持本机现状，未被同步修改。请先核对其安装来源或移除该安装（如 paseo plugin uninstall {plugin}），再重新预览差异。":
+    "The plugin stays as installed on this host. Inspect or remove the installation (e.g. `paseo plugin uninstall {plugin}`), then preview the changes again.",
+  "跳过 {plugin}：备份或本机插件缺少可识别的安装来源，本次恢复不改动该插件。":
+    "Skipped {plugin}: the install source is not identifiable from the backup or on this host; the restore leaves the plugin untouched.",
   "跳过 {plugin}：注册表安装插件不支持直接切换固定版本（本机 {head}，云端 {revision}），本次保留本机版本。":
     "Skipped {plugin}: registry-installed plugins do not support in-place version pinning (host {head}, cloud {revision}); keeping host version.",
   "本机配置与云端存在冲突：{label}。可选择「用本机配置覆盖云端」或「忽略本机改动，用云端覆盖本机」。":
