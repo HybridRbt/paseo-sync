@@ -135,9 +135,17 @@ async function capture(ctx, profile) {
     patches = {};
   for (const p of profile.manifest.plugins) {
     const row = byId.get(p.id);
+    let descriptor = null;
+    if (row) {
+      try {
+        descriptor = snapshotPlugin(row);
+      } catch {
+        descriptor = null;
+      }
+    }
     plugins[p.id] = row
       ? {
-          descriptor: snapshotPlugin(row),
+          descriptor,
           path: row.path,
           status: row.status,
           sourceState: await sourceState(row, profile),
@@ -385,11 +393,31 @@ async function planData(ctx) {
         : pluginIdentity(previous.plugins[target.id]),
       pluginIdentity(target),
     );
+    const selfId = ctx.selfIds?.includes(target.id) ? target.id : ctx.selfId;
     const blocked = transitionConflict(
       now,
       target,
-      ctx.selfIds?.includes(target.id) ? target.id : ctx.selfId,
+      selfId,
     );
+    if (
+      blocked &&
+      ctx.preferProfile &&
+      now &&
+      now.revision !== target.revision &&
+      now.registry &&
+      now.source === target.source &&
+      (now.pluginPath ?? ".") === (target.pluginPath ?? ".") &&
+      target.id !== selfId &&
+      target.id !== "paseo-sync"
+    ) {
+      skipped.push({
+        plugin: target.id,
+        reason: "registry-version-transition",
+        head: now.revision,
+        revision: target.revision,
+      });
+      continue;
+    }
     if (blocked) conflicts.push(blocked);
     if (!sameVersion) actions.push(now ? "update" : "install");
     const bundle = profile.patches.find((x) => x.plugin === target.id);

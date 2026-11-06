@@ -1577,3 +1577,73 @@ test("restore never rolls back external settings changes for a plugin skipped by
   assert.deepEqual(restored.retainedDisabledPlugins, ["firstmate"]);
   assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), external);
 });
+
+test("preferProfile skips unsupported registry version transitions as disclosed skips while applying other plugins", async (t) => {
+  const f = await fixture(t, { installed: true });
+  // Initial sync to establish baseline
+  let p = await buildPlan(f.ctx);
+  await applyPlan(f.ctx, p.approval);
+
+  // Add a registry-installed plugin locally at 1.1.1 while profile wants 1.0.1,
+  // and modify better-paseo settings locally so both localConflict and registry transition exist.
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows.push({
+      id: "paseo-cafe",
+      path: path.join(f.home, "plugins/paseo-cafe/1.1.1"),
+      enabled: true,
+      status: "running",
+      installation: {
+        identity: {
+          kind: "npm",
+          packageName: "paseo-cafe",
+          pluginPath: ".",
+          registry: { url: "https://plugins.paseo.sh", id: "paseo-cafe/cafe" },
+        },
+        currentRevision: "1.1.1",
+      },
+    });
+    return rows;
+  };
+  f.manifest.plugins.push({
+    id: "paseo-cafe",
+    source: "npm:paseo-cafe",
+    revision: "1.0.1",
+    enabled: true,
+    registry: { url: "https://plugins.paseo.sh", id: "paseo-cafe/cafe" },
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
+  await writeJson(path.join(f.root, f.manifest.settings[0].file), {
+    version: 1,
+    values: { previewWrap: true, previewStripes: true },
+  });
+
+  const normal = await buildPlan(f.ctx);
+  assert.ok(normal.conflicts.some((x) => /Local changes conflict/i.test(x)));
+  assert.ok(normal.conflicts.some((x) => /Exact registry version transition/i.test(x)));
+
+  const preferred = await buildPlan({ ...f.ctx, preferProfile: true });
+  assert.equal(preferred.preferProfile, true);
+  assert.deepEqual(preferred.conflicts, []);
+  assert.deepEqual(preferred.skipped, [
+    {
+      plugin: "paseo-cafe",
+      reason: "registry-version-transition",
+      head: "1.1.1",
+      revision: "1.0.1",
+    },
+  ]);
+  const res = await applyPlan(
+    { ...f.ctx, preferProfile: true },
+    preferred.approval,
+  );
+  assert.equal(res.changed, true);
+  assert.equal(res.verification.configurationMatches, true);
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")).values, {
+    previewWrap: true,
+    previewStripes: true,
+  });
+});
+
