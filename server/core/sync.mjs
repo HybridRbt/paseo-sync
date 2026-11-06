@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, mkdir, rm, lstat, writeFile, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 import {
   safeFile,
   bytesOrNull,
@@ -25,6 +26,7 @@ import {
 import {
   unpackBundle,
   packPluginDirectory,
+  parseTarEntries,
   BUNDLE_MARKER,
   resolveBundleArchive,
 } from "./bundle.mjs";
@@ -152,7 +154,12 @@ export async function hasBundleMarker(pluginPath) {
   }
 }
 
-async function resolvePluginDescriptor(row, target) {
+async function resolvePluginDescriptor(
+  row,
+  target,
+  profile = null,
+  ctx = null,
+) {
   if (!row) return null;
   try {
     return snapshotPlugin(row);
@@ -163,7 +170,33 @@ async function resolvePluginDescriptor(row, target) {
     row.path
   ) {
     try {
-      const packed = await packPluginDirectory(row.path);
+      const patchSpecs = (
+        profile?.patches
+          ?.filter((b) => b.plugin === row.id)
+          .flatMap((b) => b.data?.files ?? []) ?? []
+      ).map((f) => ({ ...f }));
+      if (ctx && patchSpecs.length > 0) {
+        try {
+          const raw = await resolveBundleArchive(ctx, target);
+          if (raw) {
+            const tarEntries = new Map(
+              parseTarEntries(zlib.gunzipSync(raw)).map((e) => [
+                e.name.replace(/\\/g, "/"),
+                e.content,
+              ]),
+            );
+            for (const spec of patchSpecs) {
+              const orig = tarEntries.get(spec.path?.replace(/\\/g, "/"));
+              if (orig && digest(orig) === spec.beforeSha256) {
+                spec.beforeBytes = orig;
+              }
+            }
+          }
+        } catch {}
+      }
+      const packed = await packPluginDirectory(row.path, {
+        patches: patchSpecs,
+      });
       return {
         id: row.id,
         source: target.source,
@@ -319,7 +352,7 @@ async function capture(ctx, profile) {
     patches = {};
   for (const p of profile.manifest.plugins) {
     const row = byId.get(p.id);
-    const descriptor = await resolvePluginDescriptor(row, p);
+    const descriptor = await resolvePluginDescriptor(row, p, profile, ctx);
     plugins[p.id] = row
       ? {
           descriptor,
@@ -924,7 +957,8 @@ export async function applyPlan(ctx, approval) {
       const row = (await ctx.adapter.list()).find((x) => x.id === id);
       if (!row) throw new Error(`Missing plugin after install: ${id}`);
       const installed =
-        (await resolvePluginDescriptor(row, target)) ?? snapshotPlugin(row);
+        (await resolvePluginDescriptor(row, target, profile, ctx)) ??
+        snapshotPlugin(row);
       if (
         !same(
           { ...pluginIdentity(installed), enabled: target.enabled },
@@ -1217,8 +1251,12 @@ export async function restore(ctx, id, approval) {
         continue;
       }
       const currentDescriptor = row
-        ? ((await resolvePluginDescriptor(row, before.descriptor)) ??
-          snapshotPlugin(row))
+        ? ((await resolvePluginDescriptor(
+            row,
+            before.descriptor,
+            b.profile,
+            ctx,
+          )) ?? snapshotPlugin(row))
         : null;
       if (
         !row ||

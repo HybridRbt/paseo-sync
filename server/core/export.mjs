@@ -94,6 +94,10 @@ export async function exportProfile(ctx) {
   const bundled = new Map();
   for (const row of rows) {
     if (row.installation?.identity?.kind === "directory" && row.path) {
+      const patchSpecs =
+        loaded?.patches
+          ?.filter((b) => b.plugin === row.id)
+          .flatMap((b) => b.data?.files ?? []) ?? [];
       if (isPortablePlugin(row)) {
         // Installed bundle plugin with a valid marker
         const state = await sourceState(row, loaded ?? { patches: [] });
@@ -118,7 +122,12 @@ export async function exportProfile(ctx) {
         const relPath = snap.source.startsWith("bundle:")
           ? snap.source.slice(7)
           : `bundles/${row.id}.tar.gz`;
-        const archiveBuffer = await resolveBundleArchive(ctx, snap, row.path);
+        const archiveBuffer = await resolveBundleArchive(
+          ctx,
+          snap,
+          row.path,
+          patchSpecs,
+        );
         if (!archiveBuffer) {
           skipped.push({
             plugin: row.id,
@@ -139,7 +148,9 @@ export async function exportProfile(ctx) {
             await safeFile(row.path, "paseo-plugin.json"),
           );
           if (!manifest) throw new Error("Missing paseo-plugin.json");
-          const packed = await packPluginDirectory(row.path);
+          const packed = await packPluginDirectory(row.path, {
+            patches: patchSpecs,
+          });
           const descriptor = {
             id: row.id,
             source: `bundle:bundles/${row.id}.tar.gz`,

@@ -442,3 +442,47 @@ test("matchPattern and package.json files allowlist preserve brace expansion, ch
     await rm(dst, { recursive: true, force: true });
   }
 });
+
+test("empty package.json files: [] allowlist bundles only root mandatory metadata files", async () => {
+  const src = await mkdtemp(path.join(tmpdir(), "bundle-empty-files-"));
+  try {
+    await writeFile(
+      path.join(src, "package.json"),
+      JSON.stringify({ name: "empty-files-plugin", files: [] }),
+    );
+    await writeFile(
+      path.join(src, "paseo-plugin.json"),
+      JSON.stringify({ id: "empty-files-plugin" }),
+    );
+    await writeFile(path.join(src, "README.md"), "# Readme");
+    await writeFile(path.join(src, "index.js"), "export const x = 1;");
+    await mkdir(path.join(src, "private"), { recursive: true });
+    await writeFile(path.join(src, "private/data.json"), "{}");
+    await writeFile(path.join(src, "private/README.md"), "sub readme");
+
+    const packed = await packPluginDirectory(src);
+    assert.deepEqual(Object.keys(packed.files).sort(), [
+      "README.md",
+      "package.json",
+      "paseo-plugin.json",
+    ]);
+  } finally {
+    await rm(src, { recursive: true, force: true });
+  }
+});
+
+test("buildTarBuffer and packPluginDirectory sort entries by UTF-16 code units independent of locale", async () => {
+  const { buildTarBuffer, parseTarEntries } = await import(
+    "../server/core/bundle.mjs"
+  );
+  const tar = buildTarBuffer([
+    { name: "z.js", content: Buffer.from("z") },
+    { name: "ä.js", content: Buffer.from("ae") },
+    { name: "a.js", content: Buffer.from("a") },
+  ]);
+  const parsed = parseTarEntries(tar);
+  assert.deepEqual(
+    parsed.map((e) => e.name),
+    ["a.js", "z.js", "ä.js"],
+  );
+});

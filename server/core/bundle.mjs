@@ -150,12 +150,16 @@ export function buildTarHeader(name, size, typeflag = "0", mode = 0o644) {
   return buf;
 }
 
+function compareCodeUnits(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /**
  * Builds a deterministic tar buffer from a list of { name, content } entries.
  */
 export function buildTarBuffer(entries) {
-  // Sort entries deterministically by name
-  const sorted = [...entries].sort((a, b) => a.name.localeCompare(b.name));
+  // Sort entries deterministically by UTF-16 code units (locale-independent)
+  const sorted = [...entries].sort((a, b) => compareCodeUnits(a.name, b.name));
   const buffers = [];
 
   for (const entry of sorted) {
@@ -223,8 +227,8 @@ async function scanFiles(baseDir, currentDir = "", fileList = []) {
   const fullDir = path.join(baseDir, currentDir);
   const items = await readdir(fullDir, { withFileTypes: true });
 
-  // Sort items deterministically
-  items.sort((a, b) => a.name.localeCompare(b.name));
+  // Sort items deterministically by UTF-16 code units (locale-independent)
+  items.sort((a, b) => compareCodeUnits(a.name, b.name));
 
   for (const item of items) {
     const relPath = currentDir ? `${currentDir}/${item.name}` : item.name;
@@ -604,13 +608,14 @@ function evaluatePkgFileMatch(relPath, patterns) {
   const normalized = relPath.replace(/\\/g, "/");
   const base = path.basename(normalized);
   if (
-    base === "package.json" ||
-    base === "paseo-plugin.json" ||
-    /^README(\..+)?$/i.test(base) ||
-    /^LICENSE(\..+)?$/i.test(base) ||
-    /^LICENCE(\..+)?$/i.test(base)
+    !normalized.includes("/") &&
+    (base === "package.json" ||
+      base === "paseo-plugin.json" ||
+      /^README(\..+)?$/i.test(base) ||
+      /^LICENSE(\..+)?$/i.test(base) ||
+      /^LICENCE(\..+)?$/i.test(base))
   ) {
-    return { matched: true, directLiteral: !normalized.includes("/") };
+    return { matched: true, directLiteral: true };
   }
   let matched = false;
   let directLiteral = false;
@@ -779,10 +784,11 @@ async function gitPublishable(sourceDir) {
 
 /**
  * Packaging policy. Secrets and ignore control files are always excluded.
- * A nonempty package.json "files" allowlist selects the published files while
- * still honoring nested subdirectory ignore files below directory/glob matches;
- * without one, directory-scoped .npmignore / .gitignore rules and Git's
- * worktree exclude rules apply throughout the scanned tree.
+ * A package.json "files" allowlist (including an explicitly empty `[]` list,
+ * which retains only root-level mandatory metadata files) selects the published
+ * files while still honoring nested subdirectory ignore files below
+ * directory/glob matches; without one, directory-scoped .npmignore / .gitignore
+ * rules and Git's worktree exclude rules apply throughout the scanned tree.
  */
 export async function selectBundleFiles(sourceDir, relFiles) {
   const candidates = relFiles.filter(
@@ -795,7 +801,7 @@ export async function selectBundleFiles(sourceDir, relFiles) {
     const pkg = JSON.parse(
       await readFile(path.join(sourceDir, "package.json"), "utf8"),
     );
-    if (Array.isArray(pkg?.files) && pkg.files.length > 0) {
+    if (Array.isArray(pkg?.files)) {
       pkgFiles = pkg.files;
     }
   } catch {}
@@ -837,10 +843,21 @@ export async function fingerprintDirectory(dir) {
 
 /**
  * Packs a plugin directory into a deterministic .tar.gz buffer.
+ * When `options.patches` is provided, any file whose on-disk SHA-256 matches
+ * a patch specification's `afterSha256` is restored in-memory to its verified
+ * `beforeSha256` content so the synthesized archive represents the unpatched base.
  */
 export async function packPluginDirectory(sourceDir, options = {}) {
   const maxSizeBytes = options.maxSizeBytes ?? DEFAULT_MAX_SIZE_BYTES;
   const relFiles = await selectBundleFiles(sourceDir, await scanFiles(sourceDir));
+  const patchByPath = new Map();
+  if (Array.isArray(options.patches)) {
+    for (const spec of options.patches) {
+      if (spec && typeof spec.path === "string") {
+        patchByPath.set(spec.path.replace(/\\/g, "/"), spec);
+      }
+    }
+  }
 
   let totalSize = 0;
   const entries = [];
@@ -849,16 +866,45 @@ export async function packPluginDirectory(sourceDir, options = {}) {
   for (const relPath of relFiles) {
     const fullPath = path.join(sourceDir, relPath);
     const { size, mode } = await stat(fullPath);
-    if (totalSize + size > maxSizeBytes) {
+    const patchSpec = patchByPath.get(relPath);
+    if (!patchSpec && totalSize + size > maxSizeBytes) {
       throw new Error(`Bundle size exceeds limit (${maxSizeBytes} bytes)`);
     }
-    const content = await readFile(fullPath);
+    let content = await readFile(fullPath);
+    let fileHash = sha256(content);
+    if (
+      patchSpec &&
+      patchSpec.afterSha256 &&
+      patchSpec.beforeSha256 &&
+      fileHash === patchSpec.afterSha256
+    ) {
+      if (
+        Buffer.isBuffer(patchSpec.beforeBytes) &&
+        sha256(patchSpec.beforeBytes) === patchSpec.beforeSha256
+      ) {
+        content = patchSpec.beforeBytes;
+        fileHash = patchSpec.beforeSha256;
+      } else if (
+        typeof patchSpec.replace === "string" &&
+        typeof patchSpec.find === "string" &&
+        patchSpec.replace.length > 0
+      ) {
+        const reversed = Buffer.from(
+          content.toString("utf8").split(patchSpec.replace).join(patchSpec.find),
+          "utf8",
+        );
+        if (sha256(reversed) === patchSpec.beforeSha256) {
+          content = reversed;
+          fileHash = patchSpec.beforeSha256;
+        }
+      }
+    }
     totalSize += content.length;
     if (totalSize > maxSizeBytes) {
       throw new Error(`Bundle size exceeds limit (${maxSizeBytes} bytes)`);
     }
     entries.push({ name: relPath, content, mode });
-    files[relPath] = sha256(content);
+    files[relPath] = fileHash;
   }
 
   const tarBuffer = buildTarBuffer(entries);
@@ -924,7 +970,12 @@ export async function unpackBundle(archiveBufferOrPath, targetDir, options = {})
  * (3) reconstructs and verifies from plugin directory if provided
  * Populates ctx.state cache when an archive is retrieved or reconstructed.
  */
-export async function resolveBundleArchive(ctx, target, pluginPath = null) {
+export async function resolveBundleArchive(
+  ctx,
+  target,
+  pluginPath = null,
+  patches = [],
+) {
   if (ctx?.state && target?.id && target?.revision) {
     const cachedFile = path.join(
       ctx.state,
@@ -957,7 +1008,7 @@ export async function resolveBundleArchive(ctx, target, pluginPath = null) {
   }
   if (pluginPath && target?.revision) {
     try {
-      const packed = await packPluginDirectory(pluginPath);
+      const packed = await packPluginDirectory(pluginPath, { patches });
       if (packed.sha256 === target.revision) {
         if (ctx?.state && target?.id) {
           const cachedFile = path.join(

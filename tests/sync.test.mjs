@@ -2075,3 +2075,132 @@ test("restore discloses an unidentifiable backup entry instead of crashing on a 
   assert.deepEqual(f.calls, []);
   assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), f.target);
 });
+
+test("unmarked directory plugin with recorded source patch synthesizes unpatched base revision across apply, re-plan, and restore", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "paseo-unmarked-patch-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repo = path.join(root, "repo");
+  const home = path.join(root, "home");
+  const state = path.join(root, "state");
+  const pluginDir = path.join(home, "local-plugins", "patched-bundle");
+  await mkdir(path.join(repo, "bundles"), { recursive: true });
+  await mkdir(path.join(repo, "patches"), { recursive: true });
+  await mkdir(pluginDir, { recursive: true });
+  await mkdir(state, { recursive: true });
+
+  const unpatchedCode = 'export const mode = "default";\n';
+  const patchedCode = 'export const mode = "patched";\n';
+  await writeFile(
+    path.join(pluginDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "patched-bundle", name: "Patched Bundle" }),
+  );
+  await writeFile(path.join(pluginDir, "index.js"), unpatchedCode);
+
+  const { packPluginDirectory } = await import("../server/core/bundle.mjs");
+  const packed = await packPluginDirectory(pluginDir);
+  await writeFile(
+    path.join(repo, "bundles", "patched-bundle.tar.gz"),
+    packed.buffer,
+  );
+  await writeFile(
+    path.join(repo, "patches", "patched-bundle.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        plugin: "patched-bundle",
+        revision: packed.sha256,
+        files: [
+          {
+            path: "index.js",
+            beforeSha256: digest(unpatchedCode),
+            afterSha256: digest(patchedCode),
+            find: '"default"',
+            replace: '"patched"',
+            count: 1,
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  await writeFile(
+    path.join(repo, "profile.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        plugins: [
+          {
+            id: "patched-bundle",
+            source: "bundle:bundles/patched-bundle.tar.gz",
+            revision: packed.sha256,
+            enabled: true,
+          },
+        ],
+        settings: [],
+        patches: [
+          {
+            plugin: "patched-bundle",
+            file: "patches/patched-bundle.json",
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  await writeFile(
+    path.join(home, "config.json"),
+    JSON.stringify({ pluginsEnabled: true }, null, 2),
+  );
+
+  let enabled = true;
+  const adapter = {
+    async list() {
+      return [
+        {
+          id: "patched-bundle",
+          enabled,
+          status: "running",
+          path: pluginDir,
+          installation: {
+            identity: { kind: "directory", path: pluginDir },
+          },
+        },
+      ];
+    },
+    async install() {},
+    async update() {},
+    async reload() {},
+    async act(action) {
+      if (action === "enable") enabled = true;
+      if (action === "disable") enabled = false;
+    },
+  };
+  const ctx = { root: repo, home, state, adapter };
+
+  const plan1 = await buildPlan(ctx);
+  assert.deepEqual(plan1.skipped, []);
+  assert.equal(plan1.changes.length, 1);
+  assert.deepEqual(plan1.changes[0].actions, ["patch"]);
+
+  const applied = await applyPlan(ctx, plan1.approval);
+  assert.equal(applied.changed, true);
+  assert.equal(applied.verification.configurationMatches, true);
+  assert.equal(await readFile(path.join(pluginDir, "index.js"), "utf8"), patchedCode);
+
+  const plan2 = await buildPlan(ctx);
+  assert.deepEqual(plan2.skipped, []);
+  assert.deepEqual(plan2.changes, []);
+
+  const rPlan = await restorePlan(ctx, applied.backupId);
+  assert.equal(rPlan.currentChangedSinceBackup, false);
+  assert.deepEqual(rPlan.conflicts, []);
+
+  const restored = await restore(ctx, applied.backupId, rPlan.approval);
+  assert.equal(restored.restored, true);
+  assert.equal(
+    await readFile(path.join(pluginDir, "index.js"), "utf8"),
+    unpatchedCode,
+  );
+});
