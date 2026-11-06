@@ -1667,4 +1667,126 @@ test("applies and updates offline bundle plugins idempotently", async (t) => {
     await readFile(path.join(installedDir, ".paseo-sync-bundle.json"), "utf8"),
   );
   assert.equal(meta2.revision, packedV2.sha256);
+
+  // 5. Restore backup from update rolls back V2 to V1 from cached bundle bytes
+  const restorePreview = await restorePlan(f.ctx, result2.backupId);
+  assert.equal(restorePreview.conflicts.length, 0);
+  assert.equal(restorePreview.currentChangedSinceBackup, false);
+  await restore(f.ctx, result2.backupId, restorePreview.approval);
+  assert.equal(
+    await readFile(path.join(installedDir, "index.js"), "utf8"),
+    "console.log('version 1');",
+  );
+  const metaRestored = JSON.parse(
+    await readFile(path.join(installedDir, ".paseo-sync-bundle.json"), "utf8"),
+  );
+  assert.equal(metaRestored.revision, packedV1.sha256);
+});
+
+test("detects edits to installed bundle plugins and skips destructive update", async (t) => {
+  const f = await fixture(t);
+  const bundleSourceDir = path.join(f.home, "tool-source");
+  await mkdir(bundleSourceDir, { recursive: true });
+  await writeFile(
+    path.join(bundleSourceDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "my-tool", name: "My Tool" }),
+  );
+  await writeFile(path.join(bundleSourceDir, "index.js"), "v1;");
+  const packedV1 = await packPluginDirectory(bundleSourceDir);
+  const bundleFile = path.join(f.root, "bundles/my-tool.tar.gz");
+  await mkdir(path.dirname(bundleFile), { recursive: true });
+  await writeFile(bundleFile, packedV1.buffer);
+
+  f.manifest.plugins.push({
+    id: "my-tool",
+    source: "bundle:bundles/my-tool.tar.gz",
+    revision: packedV1.sha256,
+    enabled: true,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  const plan1 = await buildPlan(f.ctx);
+  await applyPlan(f.ctx, plan1.approval);
+
+  const installedDir = path.join(f.home, "local-plugins/my-tool");
+
+  // 1. Edit installed file
+  await writeFile(path.join(installedDir, "index.js"), "locally edited v1;");
+
+  // Verify should report mismatch
+  const v = await verify(f.ctx);
+  assert.equal(v.configurationMatches, false);
+  assert.ok(v.differences.includes("source:my-tool"));
+
+  // 2. Profile updates to v2
+  await writeFile(path.join(bundleSourceDir, "index.js"), "v2;");
+  const packedV2 = await packPluginDirectory(bundleSourceDir);
+  await writeFile(bundleFile, packedV2.buffer);
+  f.manifest.plugins.find((p) => p.id === "my-tool").revision = packedV2.sha256;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  // 3. Plan should skip my-tool with local-source-changes instead of destroying edits
+  const plan2 = await buildPlan(f.ctx);
+  const toolSkip = plan2.skipped.find((s) => s.plugin === "my-tool");
+  assert.ok(toolSkip, "my-tool should be skipped");
+  assert.equal(toolSkip.reason, "local-source-changes");
+  assert.deepEqual(toolSkip.files, ["index.js"]);
+  assert.equal(plan2.changes.some((c) => c.plugin === "my-tool"), false);
+});
+
+test("refuses to update external unmanaged directory checkout with bundle", async (t) => {
+  const f = await fixture(t);
+  const externalDir = path.join(f.home, "external-checkout");
+  await mkdir(externalDir, { recursive: true });
+  await writeFile(
+    path.join(externalDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "ext-tool" }),
+  );
+  await writeFile(path.join(externalDir, "index.js"), "ext v1;");
+
+  // Install as external directory directly in adapter
+  await f.adapter.install({
+    id: "ext-tool",
+    source: externalDir,
+    revision: "local",
+    enabled: true,
+  });
+
+  const bundleFile = path.join(f.root, "bundles/ext-tool.tar.gz");
+  await mkdir(path.dirname(bundleFile), { recursive: true });
+  const remoteDir = path.join(f.home, "remote-tool-source");
+  await mkdir(remoteDir, { recursive: true });
+  await writeFile(
+    path.join(remoteDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "ext-tool" }),
+  );
+  await writeFile(path.join(remoteDir, "index.js"), "remote v2;");
+  const packedV2 = await packPluginDirectory(remoteDir);
+  await writeFile(bundleFile, packedV2.buffer);
+
+  f.manifest.plugins.push({
+    id: "ext-tool",
+    source: "bundle:bundles/ext-tool.tar.gz",
+    revision: packedV2.sha256,
+    enabled: true,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  // 1. Plan should skip external directory checkout
+  const plan = await buildPlan(f.ctx);
+  const extSkip = plan.skipped.find((s) => s.plugin === "ext-tool");
+  assert.ok(extSkip, "ext-tool should be skipped");
+  assert.equal(extSkip.reason, "local-source-changes");
+  assert.equal(extSkip.checkout, externalDir);
+
+  // 2. Direct attempt to update external directory with bundle must throw
+  const { installOrUpdateBundlePlugin } = await import("../server/core/sync.mjs");
+  await assert.rejects(
+    async () => {
+      await installOrUpdateBundlePlugin(f.ctx, f.manifest.plugins.find((p) => p.id === "ext-tool"), true, externalDir);
+    },
+    {
+      message: /Cannot update external plugin checkout with bundle/,
+    },
+  );
 });

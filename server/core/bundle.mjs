@@ -1,9 +1,37 @@
-import { readdir, readFile, writeFile, mkdir, stat } from "node:fs/promises";
+import { readdir, readFile, writeFile, mkdir, stat, chmod } from "node:fs/promises";
 import path from "node:path";
 import zlib from "node:zlib";
 import crypto from "node:crypto";
+import { gitRaw } from "./git.mjs";
 
 export const DEFAULT_MAX_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB
+export const BUNDLE_MARKER = ".paseo-sync-bundle.json";
+
+const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
+
+// Bundles are committed and pushed to the profile repository, so files that
+// commonly hold local credentials are never packaged, whatever a plugin's
+// package.json "files" allowlist or ignore files say.
+const SECRET_PATTERNS = [
+  /(^|\/)\.env$/,
+  /(^|\/)\.env\.[^/]+$/,
+  /(^|\/)\.npmrc$/,
+  /(^|\/)\.yarnrc(\.yml)?$/,
+  /(^|\/)\.netrc$/,
+  /(^|\/)\.pypirc$/,
+  /(^|\/)\.git-credentials$/,
+  /(^|\/)\.(aws|ssh|gnupg)\//,
+  /(^|\/)id_(rsa|dsa|ecdsa|ed25519)$/,
+  /\.(pem|key|p12|pfx|keystore|jks)$/i,
+];
+// Committed templates of environment files carry no secrets by convention.
+const SECRET_TEMPLATE = /(^|\/)\.env\.(example|sample|template)$/;
+
+export function isSecretPath(relPath) {
+  const normalized = relPath.replace(/\\/g, "/");
+  if (SECRET_TEMPLATE.test(normalized)) return false;
+  return SECRET_PATTERNS.some((pattern) => pattern.test(normalized));
+}
 
 const EXCLUDED_PATTERNS = [
   /(^|\/)\.git($|\/)/,
@@ -34,9 +62,11 @@ export function safeArchiveRelativePath(entryPath, targetDir) {
 }
 
 /**
- * Builds a valid ustar tar header buffer (512 bytes).
+ * Builds a valid ustar tar header buffer (512 bytes). Only the executable
+ * bit is meaningful in `mode`: it is normalized to 0755 or 0644 so archives
+ * stay deterministic across umasks.
  */
-export function buildTarHeader(name, size, typeflag = "0") {
+export function buildTarHeader(name, size, typeflag = "0", mode = 0o644) {
   const buf = Buffer.alloc(512);
 
   // name (100)
@@ -57,7 +87,8 @@ export function buildTarHeader(name, size, typeflag = "0") {
   }
 
   // mode (8 bytes octal)
-  buf.write("0000644\0", 100, 8, "ascii");
+  const normalizedMode = mode & 0o111 ? 0o755 : 0o644;
+  buf.write(normalizedMode.toString(8).padStart(7, "0") + "\0", 100, 8, "ascii");
   // uid (8)
   buf.write("0000000\0", 108, 8, "ascii");
   // gid (8)
@@ -103,7 +134,7 @@ export function buildTarBuffer(entries) {
     const content = Buffer.isBuffer(entry.content)
       ? entry.content
       : Buffer.from(entry.content);
-    const header = buildTarHeader(entry.name, content.length);
+    const header = buildTarHeader(entry.name, content.length, "0", entry.mode);
     buffers.push(header);
     buffers.push(content);
     const remainder = content.length % 512;
@@ -141,11 +172,13 @@ export function parseTarEntries(tarBuffer) {
 
     const sizeStr = header.subarray(124, 136).toString("ascii").replace(/\0.*$/, "").trim();
     const size = parseInt(sizeStr, 8) || 0;
+    const modeStr = header.subarray(100, 108).toString("ascii").replace(/\0.*$/, "").trim();
+    const mode = parseInt(modeStr, 8) || 0o644;
     const typeflag = String.fromCharCode(header[156]);
 
     offset += 512;
     const content = tarBuffer.subarray(offset, offset + size);
-    entries.push({ name, size, typeflag, content });
+    entries.push({ name, size, mode, typeflag, content });
 
     const remainder = size % 512;
     offset += size + (remainder > 0 ? 512 - remainder : 0);
@@ -155,7 +188,8 @@ export function parseTarEntries(tarBuffer) {
 }
 
 /**
- * Recursively scans a directory for files to pack.
+ * Recursively scans a directory for candidate files (built-in exclusions
+ * applied, symbolic links never followed).
  */
 async function scanFiles(baseDir, currentDir = "", fileList = []) {
   const fullDir = path.join(baseDir, currentDir);
@@ -170,7 +204,6 @@ async function scanFiles(baseDir, currentDir = "", fileList = []) {
       continue;
     }
 
-    const fullPath = path.join(fullDir, item.name);
     if (item.isDirectory()) {
       await scanFiles(baseDir, relPath, fileList);
     } else if (item.isFile()) {
@@ -181,18 +214,62 @@ async function scanFiles(baseDir, currentDir = "", fileList = []) {
   return fileList;
 }
 
+/**
+ * Translates one glob into a regex body: `*` and `?` stay within a path
+ * segment, a leading or segment-wide `**​/` matches zero or more directories
+ * and a trailing `/**` everything below. Each token is translated exactly
+ * once, so generated regex text is never rewritten again.
+ */
+function globToRegex(glob) {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        const segmentStart = i === 0 || glob[i - 1] === "/";
+        const next = glob[i + 2];
+        if (segmentStart && next === "/") {
+          re += "(?:.*/)?";
+          i += 2;
+          continue;
+        }
+        if (segmentStart && next === undefined) {
+          re += ".*";
+          i += 1;
+          continue;
+        }
+        re += "[^/]*";
+        i += 1;
+        continue;
+      }
+      re += "[^/]*";
+    } else if (c === "?") {
+      re += "[^/]";
+    } else {
+      re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return re;
+}
+
+/**
+ * npm "files" semantics: a pattern matches a file directly or through any of
+ * its parent directories (so "dist" or "dist/" includes everything below it).
+ */
 export function matchPattern(p, pat) {
-  if (pat.endsWith("/")) {
-    return p.startsWith(pat) || p === pat.slice(0, -1);
+  let pattern = pat
+    .replace(/\\/g, "/")
+    .replace(/^(\.\/)+/, "")
+    .replace(/^\/+/, "");
+  const dirOnly = pattern.endsWith("/");
+  pattern = pattern.replace(/\/+$/, "");
+  if (!pattern) return false;
+  const re = new RegExp("^" + globToRegex(pattern) + "$");
+  const parts = p.split("/");
+  for (let n = parts.length - (dirOnly ? 1 : 0); n >= 1; n--) {
+    if (re.test(parts.slice(0, n).join("/"))) return true;
   }
-  if (!pat.includes("*")) {
-    return p === pat;
-  }
-  const regexStr = pat
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*\//g, ".*")
-    .replace(/\*/g, "[^/]*");
-  return new RegExp("^" + regexStr + "$").test(p);
+  return false;
 }
 
 export function isPkgFileMatch(relPath, patterns) {
@@ -209,6 +286,7 @@ export function isPkgFileMatch(relPath, patterns) {
   }
   let matched = false;
   for (const raw of patterns) {
+    if (typeof raw !== "string") continue;
     if (raw.startsWith("!")) {
       const pat = raw.slice(1);
       if (matchPattern(normalized, pat)) return false;
@@ -220,12 +298,91 @@ export function isPkgFileMatch(relPath, patterns) {
 }
 
 /**
- * Packs a plugin directory into a deterministic .tar.gz buffer.
+ * Parses .gitignore / .npmignore text into ordered rules (last match wins).
  */
-export async function packPluginDirectory(sourceDir, options = {}) {
-  const maxSizeBytes = options.maxSizeBytes ?? DEFAULT_MAX_SIZE_BYTES;
-  const relFiles = await scanFiles(sourceDir);
+export function parseIgnore(text) {
+  const rules = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    let line = rawLine.replace(/\s+$/, "");
+    if (!line || line.startsWith("#")) continue;
+    let negate = false;
+    if (line.startsWith("!")) {
+      negate = true;
+      line = line.slice(1);
+    } else if (line.startsWith("\\")) {
+      line = line.slice(1);
+    }
+    const dirOnly = line.endsWith("/");
+    line = line.replace(/\/+$/, "");
+    // A slash at the start or in the middle anchors the pattern to the root.
+    const anchored = line.includes("/");
+    line = line.replace(/^\/+/, "");
+    if (!line) continue;
+    rules.push({
+      negate,
+      dirOnly,
+      re: new RegExp("^" + (anchored ? "" : "(?:.*/)?") + globToRegex(line) + "$"),
+    });
+  }
+  return rules;
+}
 
+export function isIgnored(relPath, rules) {
+  const parts = relPath.replace(/\\/g, "/").split("/");
+  for (let n = 1; n <= parts.length; n++) {
+    const sub = parts.slice(0, n).join("/");
+    const isDir = n < parts.length;
+    let ignored = false;
+    for (const rule of rules) {
+      if (rule.dirOnly && !isDir) continue;
+      if (rule.re.test(sub)) ignored = !rule.negate;
+    }
+    // A file below an ignored directory cannot be re-included (git semantics).
+    if (ignored) return true;
+  }
+  return false;
+}
+
+async function textOrNull(file) {
+  try {
+    return await readFile(file, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Files Git would publish from this directory (tracked plus untracked but
+ * not ignored, honoring nested and global excludes), or null when the
+ * directory is not a usable Git work tree.
+ */
+async function gitPublishable(sourceDir) {
+  try {
+    const out = await gitRaw(
+      sourceDir,
+      "ls-files",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      "-z",
+    );
+    const listed = new Set(out.split("\0").filter(Boolean));
+    // An ignored plugin directory inside an unrelated parent repository
+    // would list nothing; fall back to the plugin's own ignore file then.
+    return listed.has("paseo-plugin.json") ? listed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Packaging policy. Secrets are always excluded. A nonempty package.json
+ * "files" allowlist selects the published files; without one, an absent
+ * allowlist never means "publish the whole checkout": .npmignore applies
+ * when present, otherwise Git's ignore rules.
+ */
+export async function selectBundleFiles(sourceDir, relFiles) {
+  const candidates = relFiles.filter((f) => !isSecretPath(f));
   let pkgFiles = null;
   try {
     const pkg = JSON.parse(
@@ -235,30 +392,65 @@ export async function packPluginDirectory(sourceDir, options = {}) {
       pkgFiles = pkg.files;
     }
   } catch {}
+  if (pkgFiles) return candidates.filter((f) => isPkgFileMatch(f, pkgFiles));
+  const npmignore = await textOrNull(path.join(sourceDir, ".npmignore"));
+  if (npmignore !== null) {
+    const rules = parseIgnore(npmignore);
+    return candidates.filter((f) => !isIgnored(f, rules));
+  }
+  const listed = await gitPublishable(sourceDir);
+  if (listed) return candidates.filter((f) => listed.has(f));
+  const gitignore = await textOrNull(path.join(sourceDir, ".gitignore"));
+  if (gitignore !== null) {
+    const rules = parseIgnore(gitignore);
+    return candidates.filter((f) => !isIgnored(f, rules));
+  }
+  return candidates;
+}
+
+/**
+ * Fingerprints the files of an installed bundle directory: name -> sha256.
+ * Uses the same built-in exclusions as packing (the marker is excluded).
+ */
+export async function fingerprintDirectory(dir) {
+  const files = {};
+  for (const relPath of await scanFiles(dir)) {
+    files[relPath] = sha256(await readFile(path.join(dir, relPath)));
+  }
+  return files;
+}
+
+/**
+ * Packs a plugin directory into a deterministic .tar.gz buffer.
+ */
+export async function packPluginDirectory(sourceDir, options = {}) {
+  const maxSizeBytes = options.maxSizeBytes ?? DEFAULT_MAX_SIZE_BYTES;
+  const relFiles = await selectBundleFiles(sourceDir, await scanFiles(sourceDir));
 
   let totalSize = 0;
   const entries = [];
+  const files = {};
 
   for (const relPath of relFiles) {
-    if (pkgFiles && !isPkgFileMatch(relPath, pkgFiles)) {
-      continue;
-    }
-    const content = await readFile(path.join(sourceDir, relPath));
+    const fullPath = path.join(sourceDir, relPath);
+    const content = await readFile(fullPath);
     totalSize += content.length;
     if (totalSize > maxSizeBytes) {
       throw new Error(`Bundle size exceeds limit (${maxSizeBytes} bytes)`);
     }
-    entries.push({ name: relPath, content });
+    const { mode } = await stat(fullPath);
+    entries.push({ name: relPath, content, mode });
+    files[relPath] = sha256(content);
   }
 
   const tarBuffer = buildTarBuffer(entries);
   // Deterministic gzip with mtime: 0
   const gzipped = zlib.gzipSync(tarBuffer, { mtime: 0, level: 9 });
-  const sha256 = crypto.createHash("sha256").update(gzipped).digest("hex");
 
   return {
     buffer: gzipped,
-    sha256,
+    sha256: sha256(gzipped),
+    files,
     fileCount: entries.length,
     uncompressedBytes: totalSize,
     compressedBytes: gzipped.length,
@@ -266,7 +458,8 @@ export async function packPluginDirectory(sourceDir, options = {}) {
 }
 
 /**
- * Unpacks a .tar.gz buffer or file into a target directory with strict path safety.
+ * Unpacks a .tar.gz buffer or file into a target directory with strict path
+ * safety. Returns the extracted files' fingerprints (name -> sha256).
  */
 export async function unpackBundle(archiveBufferOrPath, targetDir, options = {}) {
   const buffer = Buffer.isBuffer(archiveBufferOrPath)
@@ -279,6 +472,7 @@ export async function unpackBundle(archiveBufferOrPath, targetDir, options = {})
   await mkdir(targetDir, { recursive: true });
 
   let fileCount = 0;
+  const files = {};
   for (const entry of entries) {
     if (entry.typeflag === "5" || entry.name.endsWith("/")) {
       // Directory entry
@@ -289,12 +483,18 @@ export async function unpackBundle(archiveBufferOrPath, targetDir, options = {})
 
     const safeFile = safeArchiveRelativePath(entry.name, targetDir);
     await mkdir(path.dirname(safeFile), { recursive: true });
-    await writeFile(safeFile, entry.content);
+    const executable = (entry.mode & 0o111) !== 0;
+    await writeFile(safeFile, entry.content, {
+      mode: executable ? 0o755 : 0o644,
+    });
+    if (executable && process.platform !== "win32") await chmod(safeFile, 0o755);
+    files[entry.name.replace(/\\/g, "/")] = sha256(entry.content);
     fileCount++;
   }
 
   return {
     fileCount,
+    files,
     extractedTo: targetDir,
   };
 }

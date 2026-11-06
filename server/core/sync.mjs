@@ -2,6 +2,7 @@ import { sourceState } from "./source-state.mjs";
 import { acquireOperation } from "./lock.mjs";
 import { randomUUID } from "node:crypto";
 import { readFile, mkdir, rm, lstat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import {
   safeFile,
@@ -21,7 +22,11 @@ import {
   patchText,
   validateSettings,
 } from "./profile.mjs";
-import { unpackBundle, packPluginDirectory } from "./bundle.mjs";
+import {
+  unpackBundle,
+  packPluginDirectory,
+  BUNDLE_MARKER,
+} from "./bundle.mjs";
 
 function skipMissingDisabled(ctx, current, target) {
   return (
@@ -128,39 +133,112 @@ async function installedFile(ctx, row, name) {
     );
   return safeFile(ctx.home, `${segments.join("/")}/${name}`);
 }
-async function installOrUpdateBundlePlugin(
+export function isManagedLocalPath(home, pluginPath) {
+  if (!pluginPath || !path.isAbsolute(pluginPath)) return false;
+  const rel = path.relative(path.join(home, "local-plugins"), pluginPath);
+  return !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+function bundleCacheFile(ctx, pluginId, revision) {
+  return path.join(ctx.state, "bundles", `${pluginId}-${revision}.tar.gz`);
+}
+
+async function getBundleArchive(ctx, target) {
+  if (ctx.state) {
+    const cachedFile = bundleCacheFile(ctx, target.id, target.revision);
+    const cachedRaw = await bytesOrNull(cachedFile);
+    if (cachedRaw && digest(cachedRaw) === target.revision) {
+      return cachedRaw;
+    }
+  }
+  if (ctx.root && target.source?.startsWith("bundle:")) {
+    const bundleRel = target.source.slice(7);
+    try {
+      const bundlePath = await safeFile(ctx.root, bundleRel);
+      const repoRaw = await bytesOrNull(bundlePath);
+      if (repoRaw && digest(repoRaw) === target.revision) {
+        if (ctx.state) {
+          const cachedFile = bundleCacheFile(ctx, target.id, target.revision);
+          await mkdir(path.dirname(cachedFile), { recursive: true });
+          await atomicWrite(cachedFile, repoRaw);
+        }
+        return repoRaw;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+async function cacheBundleArchive(ctx, pluginId, revision, buffer) {
+  if (!ctx.state) return;
+  const cachedFile = bundleCacheFile(ctx, pluginId, revision);
+  if (!(await bytesOrNull(cachedFile))) {
+    await mkdir(path.dirname(cachedFile), { recursive: true });
+    await atomicWrite(cachedFile, buffer);
+  }
+}
+
+export async function installOrUpdateBundlePlugin(
   ctx,
   target,
   isUpdate = false,
   existingPath = null,
 ) {
-  const bundleRel = target.source.slice(7);
-  const bundlePath = await safeFile(ctx.root, bundleRel);
-  const raw = await readFile(bundlePath);
-  if (digest(raw) !== target.revision) {
+  if (isUpdate && existingPath && !isManagedLocalPath(ctx.home, existingPath)) {
     throw new Error(
-      `Bundle hash mismatch for ${target.id}: expected ${target.revision}, got ${digest(raw)}`,
+      `Cannot update external plugin checkout with bundle: ${target.id} (${existingPath})`,
     );
   }
-  const isManagedLocal =
-    existingPath &&
-    !path
-      .relative(path.join(ctx.home, "local-plugins"), existingPath)
-      .startsWith("..");
-  const destDir = isManagedLocal
-    ? existingPath
-    : path.join(ctx.home, "local-plugins", target.id);
+
+  // Preserve previous bundle archive before replacing it so restore can roll back (Review #1)
+  if (isUpdate && existingPath && isManagedLocalPath(ctx.home, existingPath)) {
+    try {
+      const metaFile = path.join(existingPath, BUNDLE_MARKER);
+      const rawMeta = await bytesOrNull(metaFile);
+      if (rawMeta) {
+        const meta = JSON.parse(rawMeta.toString("utf8"));
+        if (meta.revision) {
+          const prevCacheFile = bundleCacheFile(ctx, target.id, meta.revision);
+          if (!(await bytesOrNull(prevCacheFile))) {
+            const packed = await packPluginDirectory(existingPath);
+            if (packed.sha256 === meta.revision) {
+              await cacheBundleArchive(ctx, target.id, meta.revision, packed.buffer);
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const raw = await getBundleArchive(ctx, target);
+  if (!raw) {
+    throw new Error(
+      `Bundle archive not found or hash mismatch for ${target.id}: expected ${target.revision}`,
+    );
+  }
+
+  const destDir =
+    isUpdate && existingPath && isManagedLocalPath(ctx.home, existingPath)
+      ? existingPath
+      : path.join(ctx.home, "local-plugins", target.id);
+
   await rm(destDir, { recursive: true, force: true });
-  await unpackBundle(raw, destDir);
+  const unpacked = await unpackBundle(raw, destDir);
   await writeFile(
-    path.join(destDir, ".paseo-sync-bundle.json"),
+    path.join(destDir, BUNDLE_MARKER),
     JSON.stringify(
-      { source: target.source, revision: target.revision },
+      {
+        source: target.source,
+        revision: target.revision,
+        files: unpacked.files,
+      },
       null,
       2,
     ),
     "utf8",
   );
+  await cacheBundleArchive(ctx, target.id, target.revision, raw);
+
   if (!isUpdate) {
     await ctx.adapter.install({ ...target, source: destDir });
   } else {
@@ -440,6 +518,25 @@ async function planData(ctx) {
             },
       );
       continue;
+    }
+    // An external unmanaged directory checkout must not be overwritten or
+    // converted into a bundle in local-plugins: skip it with its checkout
+    // disclosed, preserving the developer's working directory.
+    if (
+      currentPlugin?.path &&
+      target.source.startsWith("bundle:") &&
+      !isManagedLocalPath(ctx.home, currentPlugin.path) &&
+      !existsSync(path.join(currentPlugin.path, BUNDLE_MARKER))
+    ) {
+      if (now?.revision !== target.revision) {
+        skipped.push({
+          plugin: target.id,
+          reason: "local-source-changes",
+          checkout: currentPlugin.path,
+          files: [],
+        });
+        continue;
+      }
     }
     const sameVersion =
       now &&
@@ -884,6 +981,14 @@ export async function restorePlan(ctx, id) {
         ctx.selfIds?.includes(plugin) ? plugin : ctx.selfId,
       );
       if (conflict) conflicts.push(conflict);
+      if (before.descriptor?.source?.startsWith("bundle:")) {
+        const archive = await getBundleArchive(ctx, before.descriptor);
+        if (!archive) {
+          conflicts.push(
+            `Previous bundle archive for ${plugin} (${before.descriptor.revision.slice(0, 7)}) is not available in local cache or repository; cannot restore.`,
+          );
+        }
+      }
     }
   }
   const skippedIds = new Set(skipped.map((s) => s.plugin));

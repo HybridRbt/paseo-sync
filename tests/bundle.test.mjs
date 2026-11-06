@@ -153,3 +153,80 @@ test("packPluginDirectory respects package.json files array when defined", async
     await rm(dst, { recursive: true, force: true });
   }
 });
+
+test("matchPattern and packPluginDirectory preserve globstar recursive wildcard semantics", async () => {
+  const { matchPattern } = await import("../server/core/bundle.mjs");
+  assert.equal(matchPattern("index.js", "**/*.js"), true);
+  assert.equal(matchPattern("dist/index.js", "**/*.js"), true);
+  assert.equal(matchPattern("dist/nested/index.js", "**/*.js"), true);
+  assert.equal(matchPattern("dist/index.ts", "**/*.js"), false);
+  assert.equal(matchPattern("dist/index.js", "dist/**/*.js"), true);
+  assert.equal(matchPattern("dist/nested/deep/index.js", "dist/**/*.js"), true);
+  assert.equal(matchPattern("other/index.js", "dist/**/*.js"), false);
+});
+
+test("packPluginDirectory excludes local secrets and honors ignore files", async () => {
+  const src = await mkdtemp(path.join(tmpdir(), "bundle-secrets-src-"));
+  const dst = await mkdtemp(path.join(tmpdir(), "bundle-secrets-dst-"));
+  try {
+    await writeFile(
+      path.join(src, "paseo-plugin.json"),
+      JSON.stringify({ id: "secret-test" }),
+    );
+    await writeFile(path.join(src, "index.js"), "console.log('hi');");
+    await writeFile(path.join(src, ".env"), "API_KEY=secret");
+    await writeFile(path.join(src, ".env.local"), "SECRET=true");
+    await writeFile(path.join(src, ".env.example"), "API_KEY=your_key_here");
+    await writeFile(path.join(src, ".npmrc"), "//registry.npmjs.org/:_authToken=secret");
+    await writeFile(path.join(src, "id_rsa"), "-----BEGIN RSA PRIVATE KEY-----");
+    await writeFile(path.join(src, ".gitignore"), "ignored.txt\nbuild/\n");
+    await writeFile(path.join(src, "ignored.txt"), "should be ignored");
+    await mkdir(path.join(src, "build"), { recursive: true });
+    await writeFile(path.join(src, "build/out.js"), "ignored build output");
+
+    const packed = await packPluginDirectory(src);
+    const res = await unpackBundle(packed.buffer, dst);
+
+    assert.equal(await readFile(path.join(dst, "index.js"), "utf8"), "console.log('hi');");
+    assert.equal(await readFile(path.join(dst, ".env.example"), "utf8"), "API_KEY=your_key_here");
+    await assert.rejects(async () => readFile(path.join(dst, ".env")));
+    await assert.rejects(async () => readFile(path.join(dst, ".env.local")));
+    await assert.rejects(async () => readFile(path.join(dst, ".npmrc")));
+    await assert.rejects(async () => readFile(path.join(dst, "id_rsa")));
+    await assert.rejects(async () => readFile(path.join(dst, "ignored.txt")));
+    await assert.rejects(async () => readFile(path.join(dst, "build/out.js")));
+  } finally {
+    await rm(src, { recursive: true, force: true });
+    await rm(dst, { recursive: true, force: true });
+  }
+});
+
+test("preserve executable permissions through bundle round trips", async () => {
+  if (process.platform === "win32") return;
+  const src = await mkdtemp(path.join(tmpdir(), "bundle-perm-src-"));
+  const dst = await mkdtemp(path.join(tmpdir(), "bundle-perm-dst-"));
+  try {
+    await writeFile(path.join(src, "paseo-plugin.json"), JSON.stringify({ id: "perm-test" }));
+    const helperPath = path.join(src, "helper.sh");
+    await writeFile(helperPath, "#!/bin/sh\necho hello\n", { mode: 0o755 });
+    const { chmod } = await import("node:fs/promises");
+    await chmod(helperPath, 0o755);
+
+    const normalPath = path.join(src, "normal.txt");
+    await writeFile(normalPath, "regular file", { mode: 0o644 });
+    await chmod(normalPath, 0o644);
+
+    const packed = await packPluginDirectory(src);
+    await unpackBundle(packed.buffer, dst);
+
+    const { stat } = await import("node:fs/promises");
+    const helperStat = await stat(path.join(dst, "helper.sh"));
+    const normalStat = await stat(path.join(dst, "normal.txt"));
+
+    assert.equal((helperStat.mode & 0o111) !== 0, true, "helper.sh should retain executable bit");
+    assert.equal((normalStat.mode & 0o111) === 0, true, "normal.txt should not have executable bit");
+  } finally {
+    await rm(src, { recursive: true, force: true });
+    await rm(dst, { recursive: true, force: true });
+  }
+});

@@ -125,14 +125,19 @@ export async function exportProfile(ctx) {
       });
       continue;
     }
-    if (row.installation?.identity.kind !== "git" || !row.path) continue;
+    if (
+      (row.installation?.identity?.kind !== "git" &&
+        row.installation?.identity?.kind !== "directory") ||
+      !row.path
+    )
+      continue;
     // sourceState shares the cleanliness notion of apply and baseline capture:
     // recorded patch applications stay clean, any other working-tree change or
     // a HEAD drift from provenance does not.
     const state = await sourceState(row, loaded ?? { patches: [] });
-    if (state.clean) continue;
+    if (!state || state.clean) continue;
     skipped.push(
-      state.head === row.installation.currentRevision
+      state.head === (row.installation.currentRevision ?? state.head)
         ? {
             plugin: row.id,
             reason: "local-source-changes",

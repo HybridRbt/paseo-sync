@@ -7,6 +7,11 @@ import {
   digest,
   objectHash,
 } from "./files.mjs";
+import {
+  fingerprintDirectory,
+  packPluginDirectory,
+  BUNDLE_MARKER,
+} from "./bundle.mjs";
 
 // Install-time build steps overwrite committed placeholder files with
 // generated bundles (better-paseo writes a ~715KB client chunk into
@@ -65,6 +70,45 @@ async function installBuildScope(row, top) {
 }
 
 export async function sourceState(row, profile) {
+  if (row.installation?.identity.kind === "directory" && row.path) {
+    const metaFile = path.join(row.path, BUNDLE_MARKER);
+    const raw = await bytesOrNull(metaFile);
+    if (!raw) return null;
+    try {
+      const meta = JSON.parse(raw.toString("utf8"));
+      if (!meta.source?.startsWith("bundle:") || !meta.revision) return null;
+      const currentFiles = await fingerprintDirectory(row.path);
+      const changed = [];
+      if (meta.files && typeof meta.files === "object") {
+        const expectedFiles = meta.files;
+        const allPaths = new Set([
+          ...Object.keys(currentFiles),
+          ...Object.keys(expectedFiles),
+        ]);
+        for (const p of allPaths) {
+          if (currentFiles[p] !== expectedFiles[p]) {
+            changed.push(p);
+          }
+        }
+      } else {
+        // Fallback for bundles without per-file fingerprints
+        const packed = await packPluginDirectory(row.path);
+        if (packed.sha256 !== meta.revision) {
+          changed.push("*");
+        }
+      }
+      changed.sort();
+      const clean = changed.length === 0;
+      return {
+        clean,
+        head: meta.revision,
+        statusHash: objectHash(changed),
+        changed,
+      };
+    } catch {
+      return null;
+    }
+  }
   if (row.installation?.identity.kind !== "git") return null;
   const head = await git(row.path, "rev-parse", "HEAD");
   const status = await gitRaw(
