@@ -25,6 +25,8 @@ export const startRpc = defineRpc({
       .string()
       .regex(/^(cafe:)?[a-f0-9-]{36}$/)
       .optional(),
+    preferProfile: z.boolean().optional(),
+    preferLocal: z.boolean().optional(),
   }),
   output: z.object({ id: z.string(), kind: z.string(), status: z.string() }),
 });
