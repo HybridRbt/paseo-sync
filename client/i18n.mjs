@@ -81,6 +81,11 @@ const english = {
     "Open {plugin} source checkout in file manager",
   已打开终端: "Terminal opened",
   已在文件管理器中打开: "Opened in file manager",
+  复制路径: "Copy path",
+  "复制 {plugin} 源码目录路径": "Copy {plugin} source checkout path",
+  已复制路径: "Path copied",
+  "复制失败：{error}，路径已显示在上方，可手动选中复制。":
+    "Copy failed: {error}. The path is shown above; select and copy it manually.",
   "打开失败：{error}": "Failed to open: {error}",
   "当前平台不支持该快捷方式。": "Shortcut unsupported on this platform.",
   未知错误: "Unknown error",
