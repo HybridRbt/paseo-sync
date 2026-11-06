@@ -1790,3 +1790,91 @@ test("refuses to update external unmanaged directory checkout with bundle", asyn
     },
   );
 });
+
+test("protects unmarked development directory inside local-plugins from destructive bundle updates and supports same-revision changes", async (t) => {
+  const f = await fixture(t);
+  const localDevDir = path.join(f.home, "local-plugins/dev-tool");
+  await mkdir(localDevDir, { recursive: true });
+  await writeFile(
+    path.join(localDevDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "dev-tool" }),
+  );
+  await writeFile(path.join(localDevDir, "index.js"), "dev v1;");
+  // Ignored local secret that is excluded from bundle packing but exists on disk
+  await writeFile(path.join(localDevDir, ".env"), "SECRET_TOKEN=keep-me");
+
+  // Pack v1 from the same source so revision matches
+  const packedV1 = await packPluginDirectory(localDevDir);
+  const bundleFile = path.join(f.root, "bundles/dev-tool.tar.gz");
+  await mkdir(path.dirname(bundleFile), { recursive: true });
+  await writeFile(bundleFile, packedV1.buffer);
+
+  // Register as an unmarked directory plugin (no .paseo-sync-bundle.json on disk)
+  await f.adapter.install({
+    id: "dev-tool",
+    source: localDevDir,
+    revision: "local",
+    enabled: true,
+  });
+
+  // 1. Same-revision disable change on unmarked directory plugin must succeed through buildPlan -> applyPlan -> restore
+  f.manifest.plugins.push({
+    id: "dev-tool",
+    source: "bundle:bundles/dev-tool.tar.gz",
+    revision: packedV1.sha256,
+    enabled: false,
+  });
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  const planDisable = await buildPlan(f.ctx);
+  assert.deepEqual(planDisable.conflicts, []);
+  const disableChange = planDisable.changes.find((c) => c.plugin === "dev-tool");
+  assert.ok(disableChange, "Should plan disable for same-revision unmarked directory plugin");
+  assert.deepEqual(disableChange.actions, ["disable"]);
+
+  const appliedDisable = await applyPlan(f.ctx, planDisable.approval);
+  assert.equal(appliedDisable.changed, true);
+  assert.equal(appliedDisable.verification.configurationMatches, true);
+  assert.equal((await f.adapter.list()).find((p) => p.id === "dev-tool").enabled, false);
+  // .env must still be intact
+  assert.equal(await readFile(path.join(localDevDir, ".env"), "utf8"), "SECRET_TOKEN=keep-me");
+
+  const undoDisable = await restorePlan(f.ctx, appliedDisable.backupId);
+  assert.deepEqual(undoDisable.conflicts, []);
+  await restore(f.ctx, appliedDisable.backupId, undoDisable.approval);
+  assert.equal((await f.adapter.list()).find((p) => p.id === "dev-tool").enabled, true);
+
+  // 2. Now update bundle in profile to v2 while localDevDir remains an unmarked checkout
+  const remoteDir = path.join(f.home, "remote-dev-tool");
+  await mkdir(remoteDir, { recursive: true });
+  await writeFile(
+    path.join(remoteDir, "paseo-plugin.json"),
+    JSON.stringify({ id: "dev-tool" }),
+  );
+  await writeFile(path.join(remoteDir, "index.js"), "remote v2;");
+  const packedV2 = await packPluginDirectory(remoteDir);
+  await writeFile(bundleFile, packedV2.buffer);
+
+  const targetEntry = f.manifest.plugins.find((p) => p.id === "dev-tool");
+  targetEntry.revision = packedV2.sha256;
+  targetEntry.enabled = true;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+
+  // buildPlan must skip dev-tool rather than scheduling a destructive update
+  const planUpdate = await buildPlan(f.ctx);
+  const devSkip = planUpdate.skipped.find((s) => s.plugin === "dev-tool");
+  assert.ok(devSkip, "unmarked directory in local-plugins should be skipped on revision change");
+  assert.equal(devSkip.reason, "local-source-changes");
+  assert.equal(devSkip.checkout, localDevDir);
+  assert.equal(planUpdate.changes.some((c) => c.plugin === "dev-tool"), false);
+
+  // Direct call to installOrUpdateBundlePlugin must also refuse to wipe unmarked localDevDir
+  const { installOrUpdateBundlePlugin } = await import("../server/core/sync.mjs");
+  await assert.rejects(
+    async () => {
+      await installOrUpdateBundlePlugin(f.ctx, targetEntry, true, localDevDir);
+    },
+    /Cannot (?:update|overwrite) unmarked plugin directory with bundle/,
+  );
+  assert.equal(await readFile(path.join(localDevDir, ".env"), "utf8"), "SECRET_TOKEN=keep-me");
+});

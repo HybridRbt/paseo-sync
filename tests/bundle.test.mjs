@@ -257,3 +257,39 @@ test("validate tar path components by UTF-8 byte length and reject unrepresentab
   assert.equal(parsedAscii.length, 1);
   assert.equal(parsedAscii[0].name, longAsciiPath);
 });
+
+test("allow filenames with consecutive dots while rejecting parent-directory traversal segments", async () => {
+  const src = await mkdtemp(path.join(tmpdir(), "bundle-dots-src-"));
+  const dst = await mkdtemp(path.join(tmpdir(), "bundle-dots-dst-"));
+  try {
+    await writeFile(path.join(src, "paseo-plugin.json"), JSON.stringify({ id: "dots-test" }));
+    await writeFile(path.join(src, "loading...svg"), "<svg/>");
+    await mkdir(path.join(src, "pages"), { recursive: true });
+    await writeFile(path.join(src, "pages/[[...slug]].tsx"), "export default function Page() {}");
+    await writeFile(path.join(src, "a..b.js"), "export const x = 1;");
+
+    const packed = await packPluginDirectory(src);
+    await unpackBundle(packed.buffer, dst);
+
+    assert.equal(await readFile(path.join(dst, "loading...svg"), "utf8"), "<svg/>");
+    assert.equal(
+      await readFile(path.join(dst, "pages/[[...slug]].tsx"), "utf8"),
+      "export default function Page() {}",
+    );
+    assert.equal(await readFile(path.join(dst, "a..b.js"), "utf8"), "export const x = 1;");
+
+    const { buildTarHeader } = await import("../server/core/bundle.mjs");
+    const { gzipSync } = await import("node:zlib");
+    const badHeader = buildTarHeader("pages/../escape.txt", 4);
+    const badData = Buffer.alloc(512);
+    Buffer.from("evil").copy(badData);
+    const badArchive = gzipSync(Buffer.concat([badHeader, badData, Buffer.alloc(1024)]));
+    await assert.rejects(
+      async () => unpackBundle(badArchive, dst),
+      /Path traversal detected in archive entry/,
+    );
+  } finally {
+    await rm(src, { recursive: true, force: true });
+    await rm(dst, { recursive: true, force: true });
+  }
+});

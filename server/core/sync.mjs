@@ -140,6 +140,41 @@ export function isManagedLocalPath(home, pluginPath) {
   return !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
+export async function hasBundleMarker(pluginPath) {
+  if (!pluginPath) return false;
+  try {
+    const raw = await bytesOrNull(path.join(pluginPath, BUNDLE_MARKER));
+    if (!raw) return false;
+    const meta = JSON.parse(raw.toString("utf8"));
+    return Boolean(meta?.source?.startsWith("bundle:") && meta?.revision);
+  } catch {
+    return false;
+  }
+}
+
+async function resolvePluginDescriptor(row, target) {
+  if (!row) return null;
+  try {
+    return snapshotPlugin(row);
+  } catch {}
+  if (
+    target?.source?.startsWith("bundle:") &&
+    row.installation?.identity?.kind === "directory" &&
+    row.path
+  ) {
+    try {
+      const packed = await packPluginDirectory(row.path);
+      return {
+        id: row.id,
+        source: target.source,
+        revision: packed.sha256,
+        enabled: row.enabled,
+      };
+    } catch {}
+  }
+  return null;
+}
+
 function bundleCacheFile(ctx, pluginId, revision) {
   return path.join(ctx.state, "bundles", `${pluginId}-${revision}.tar.gz`);
 }
@@ -163,9 +198,25 @@ export async function installOrUpdateBundlePlugin(
   isUpdate = false,
   existingPath = null,
 ) {
-  if (isUpdate && existingPath && !isManagedLocalPath(ctx.home, existingPath)) {
+  const destDir =
+    isUpdate && existingPath && isManagedLocalPath(ctx.home, existingPath)
+      ? existingPath
+      : path.join(ctx.home, "local-plugins", target.id);
+
+  if (isUpdate) {
+    if (!existingPath || !isManagedLocalPath(ctx.home, existingPath)) {
+      throw new Error(
+        `Cannot update external plugin checkout with bundle: ${target.id} (${existingPath})`,
+      );
+    }
+    if (!(await hasBundleMarker(existingPath))) {
+      throw new Error(
+        `Cannot overwrite unmarked plugin directory with bundle: ${target.id} (${existingPath})`,
+      );
+    }
+  } else if (existsSync(destDir) && !(await hasBundleMarker(destDir))) {
     throw new Error(
-      `Cannot update external plugin checkout with bundle: ${target.id} (${existingPath})`,
+      `Cannot overwrite unmarked plugin directory with bundle: ${target.id} (${destDir})`,
     );
   }
 
@@ -195,11 +246,6 @@ export async function installOrUpdateBundlePlugin(
       `Bundle archive not found or hash mismatch for ${target.id}: expected ${target.revision}`,
     );
   }
-
-  const destDir =
-    isUpdate && existingPath && isManagedLocalPath(ctx.home, existingPath)
-      ? existingPath
-      : path.join(ctx.home, "local-plugins", target.id);
 
   await rm(destDir, { recursive: true, force: true });
   const unpacked = await unpackBundle(raw, destDir);
@@ -240,28 +286,7 @@ async function capture(ctx, profile) {
     patches = {};
   for (const p of profile.manifest.plugins) {
     const row = byId.get(p.id);
-    let descriptor = null;
-    if (row) {
-      try {
-        descriptor = snapshotPlugin(row);
-      } catch {}
-      if (
-        !descriptor &&
-        p.source.startsWith("bundle:") &&
-        row.installation?.identity?.kind === "directory" &&
-        row.path
-      ) {
-        try {
-          const packed = await packPluginDirectory(row.path);
-          descriptor = {
-            id: row.id,
-            source: p.source,
-            revision: packed.sha256,
-            enabled: row.enabled,
-          };
-        } catch {}
-      }
-    }
+    const descriptor = await resolvePluginDescriptor(row, p);
     plugins[p.id] = row
       ? {
           descriptor,
@@ -498,14 +523,14 @@ async function planData(ctx) {
       );
       continue;
     }
-    // An external unmanaged directory checkout must not be overwritten or
+    // An external or unmarked directory checkout must not be overwritten or
     // converted into a bundle in local-plugins: skip it with its checkout
     // disclosed, preserving the developer's working directory.
     if (
       currentPlugin?.path &&
       target.source.startsWith("bundle:") &&
-      !isManagedLocalPath(ctx.home, currentPlugin.path) &&
-      !existsSync(path.join(currentPlugin.path, BUNDLE_MARKER))
+      (!isManagedLocalPath(ctx.home, currentPlugin.path) ||
+        !(await hasBundleMarker(currentPlugin.path)))
     ) {
       if (now?.revision !== target.revision) {
         skipped.push({
@@ -831,7 +856,8 @@ export async function applyPlan(ctx, approval) {
       }
       const row = (await ctx.adapter.list()).find((x) => x.id === id);
       if (!row) throw new Error(`Missing plugin after install: ${id}`);
-      const installed = snapshotPlugin(row);
+      const installed =
+        (await resolvePluginDescriptor(row, target)) ?? snapshotPlugin(row);
       if (
         !same(
           { ...pluginIdentity(installed), enabled: target.enabled },
@@ -1114,11 +1140,15 @@ export async function restore(ctx, id, approval) {
         }
         continue;
       }
+      const currentDescriptor = row
+        ? ((await resolvePluginDescriptor(row, before.descriptor)) ??
+          snapshotPlugin(row))
+        : null;
       if (
         !row ||
         !same(
           {
-            ...pluginIdentity(snapshotPlugin(row)),
+            ...pluginIdentity(currentDescriptor),
             enabled: before.descriptor.enabled,
           },
           pluginIdentity(before.descriptor),

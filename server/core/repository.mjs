@@ -138,6 +138,7 @@ async function exportSnapshot(ctx) {
     const exported = await exportProfile({ ...ctx, root: temp });
     const loaded = await loadProfile(temp);
     const files = [];
+    const _bytes = new Map();
     for (const file of [
       "profile.json",
       ...loaded.manifest.settings.map((x) => x.file),
@@ -149,6 +150,7 @@ async function exportSnapshot(ctx) {
         after = await bytesOrNull(await safeFile(temp, file));
       if (!before?.equals(after)) {
         const isBinary = file.endsWith(".tar.gz") || file.endsWith(".tgz");
+        _bytes.set(file, after);
         files.push({
           path: file,
           binary: isBinary || undefined,
@@ -158,7 +160,6 @@ async function exportSnapshot(ctx) {
               : null
             : before?.toString("utf8") ?? null,
           after: isBinary ? after.toString("base64") : after.toString("utf8"),
-          _bytes: after,
         });
       }
     }
@@ -177,6 +178,7 @@ async function exportSnapshot(ctx) {
         loaded,
         new Set(exported.skipped.map((s) => s.plugin)),
       ),
+      _bytes,
       approval: objectHash({
         head,
         origin,
@@ -191,7 +193,7 @@ async function exportSnapshot(ctx) {
   }
 }
 export async function publishPlan(ctx) {
-  const { _baseline, ...preview } = await exportSnapshot(ctx);
+  const { _baseline, _bytes, ...preview } = await exportSnapshot(ctx);
   return preview;
 }
 export async function publish(ctx, approval, { push = true } = {}) {
@@ -203,7 +205,7 @@ export async function publish(ctx, approval, { push = true } = {}) {
     if (p.files.length) {
       for (const file of p.files) {
         const payload =
-          file._bytes ??
+          p._bytes?.get(file.path) ??
           (file.binary ? Buffer.from(file.after, "base64") : file.after);
         await atomicWrite(await safeFile(ctx.root, file.path), payload);
       }

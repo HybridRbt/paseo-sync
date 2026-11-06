@@ -302,6 +302,9 @@ test("publish preview packages a valid directory plugin into a bundle without tr
   const flowlyEntry = manifest.plugins.find((x) => x.id === "flowly");
   assert.ok(flowlyEntry);
   assert.equal(flowlyEntry.source, "bundle:bundles/flowly.tar.gz");
+  for (const fileEntry of p.files) {
+    assert.equal("_bytes" in fileEntry, false, "publishPlan file entry must not leak raw _bytes buffer");
+  }
 
   const baseline = await jsonOrNull(await safeFile(f.state, "baseline.json"));
   assert.ok(baseline?.plugins?.flowly);

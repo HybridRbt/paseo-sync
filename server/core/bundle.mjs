@@ -50,8 +50,16 @@ export function shouldExclude(relPath) {
 }
 
 export function safeArchiveRelativePath(entryPath, targetDir) {
+  const rawSegments = String(entryPath).split(/[\\/]+/);
   const normalized = path.normalize(entryPath).replace(/^[\\/]+/, "");
-  if (normalized.includes("..") || path.isAbsolute(entryPath)) {
+  const normSegments = normalized.split(/[\\/]+/);
+  if (
+    !entryPath ||
+    path.isAbsolute(entryPath) ||
+    /^[a-zA-Z]:/.test(entryPath) ||
+    rawSegments.includes("..") ||
+    normSegments.includes("..")
+  ) {
     throw new Error(`Path traversal detected in archive entry: ${entryPath}`);
   }
   const resolved = path.resolve(targetDir, normalized);
