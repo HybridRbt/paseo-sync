@@ -1,6 +1,30 @@
 const english = {
   "跳过 {plugin}：本机未安装，配置要求保持禁用。":
     "Skip {plugin}: not installed on this host and disabled in the profile.",
+  "跳过 {plugin}：本地开发或未受管插件，本次不发布它的变更。":
+    "Skipped {plugin}: local development or untracked plugin; its changes are not published this time.",
+  "跳过 {plugin}：注册表安装插件不支持直接切换固定版本（本机 {head}，云端 {revision}），本次保留本机版本。":
+    "Skipped {plugin}: registry-installed plugins do not support in-place version pinning (host {head}, cloud {revision}); keeping host version.",
+  "本机配置与云端存在冲突：{label}。可选择「用本机配置覆盖云端」或「忽略本机改动，用云端覆盖本机」。":
+    "Local changes conflict with the cloud profile: {label}. Choose “Overwrite cloud with this host” or “Ignore local changes and apply cloud profile”.",
+  "注册表安装的插件不支持直接切换历史版本：{plugin}。可选择「用本机配置覆盖云端」，或选择「用云端覆盖本机」以跳过该插件版本切换。":
+    "Exact registry version transition is not supported: {plugin}. Choose “Overwrite cloud with this host”, or choose “Apply cloud profile” to skip this plugin's version transition.",
+  "云端配置仓库存在尚未应用到本机的插件变更：{plugin}。可先同步到本机，或选择「强制用本机配置覆盖云端」。":
+    "The configuration repository has unapplied changes for {plugin}. Sync to this host first, or choose “Force overwrite cloud with this host”.",
+  "云端配置仓库存在尚未应用到本机的设置变更：{file}。可先同步到本机，或选择「强制用本机配置覆盖云端」。":
+    "The configuration repository has unapplied settings changes: {file}. Sync to this host first, or choose “Force overwrite cloud with this host”.",
+  "用本机配置覆盖云端（预览发布）":
+    "Overwrite cloud with this host (preview publish)",
+  "忽略本机改动，用云端覆盖本机（重新预览）":
+    "Ignore local changes, overwrite this host with cloud (re-preview)",
+  "忽略云端未应用改动，强制用本机配置覆盖云端（重新预览）":
+    "Ignore unapplied cloud changes, force overwrite cloud with this host (re-preview)",
+  "已启用「用云端覆盖本机」模式：将忽略本机自上次同步以来的本地修改，按云端配置应用。":
+    "“Overwrite host with cloud” mode enabled: local edits since the last sync will be overwritten by the cloud profile.",
+  "已启用「用本机覆盖云端」模式：将忽略云端未应用的远端修改，直接导出本机当前配置。":
+    "“Overwrite cloud with host” mode enabled: unapplied cloud changes will be overwritten by this host's current configuration.",
+  "预览并应用或发布同步配置":
+    "Preview and apply or publish the configuration",
   "跳过 {plugin}：本地源码有未提交改动，本次不发布它的变更。":
     "Skipped {plugin}: local source has uncommitted changes; its changes are not published this time.",
   "跳过 {plugin}：本机源码与安装版本不一致，本次不发布它的变更。":
@@ -355,3 +379,45 @@ export function renderDriftDisclosure(drift, t) {
   }
   return lines;
 }
+
+export function formatConflict(conflict, t) {
+  if (typeof conflict !== "string") return String(conflict ?? "");
+  const mLocal = conflict.match(
+    /^Local changes conflict with profile: (.+?)\. Export local changes or review --prefer-profile\.$/,
+  );
+  if (mLocal) {
+    return t(
+      "本机配置与云端存在冲突：{label}。可选择「用本机配置覆盖云端」或「忽略本机改动，用云端覆盖本机」。",
+      { label: mLocal[1] },
+    );
+  }
+  const mRegistry = conflict.match(
+    /^Exact registry version transition is not supported: (.+?)\. Review registry provenance separately; no reinstall will be attempted\.$/,
+  );
+  if (mRegistry) {
+    return t(
+      "注册表安装的插件不支持直接切换历史版本：{plugin}。可选择「用本机配置覆盖云端」，或选择「用云端覆盖本机」以跳过该插件版本切换。",
+      { plugin: mRegistry[1] },
+    );
+  }
+  const mUnappliedPlugin = conflict.match(
+    /^Repository has unapplied changes for (.+?); apply or reconcile before exporting\.$/,
+  );
+  if (mUnappliedPlugin) {
+    return t(
+      "云端配置仓库存在尚未应用到本机的插件变更：{plugin}。可先同步到本机，或选择「强制用本机配置覆盖云端」。",
+      { plugin: mUnappliedPlugin[1] },
+    );
+  }
+  const mUnappliedSettings = conflict.match(
+    /^Repository has unapplied settings changes: (.+)$/,
+  );
+  if (mUnappliedSettings) {
+    return t(
+      "云端配置仓库存在尚未应用到本机的设置变更：{file}。可先同步到本机，或选择「强制用本机配置覆盖云端」。",
+      { file: mUnappliedSettings[1] },
+    );
+  }
+  return conflict;
+}
+
