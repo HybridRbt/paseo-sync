@@ -1117,7 +1117,7 @@ export function ResultSummary({
               ) : null}
               <Text selectable style={text}>
                 {t(
-                  "该插件本次保持本机现状，未被同步修改。在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再重新预览差异即可同步新版本。",
+                  "该插件本次保持本机现状，未被同步修改。在插件源码仓库提交并推送后，运行 paseo plugin update {plugin}，再发布一次让新版本进入配置仓库，然后重新预览差异即可完成同步。",
                   { plugin: s.plugin },
                 )}
               </Text>
