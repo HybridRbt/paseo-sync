@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, lstat, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { digest, writeJson } from "../server/core/files.mjs";
-import { packPluginDirectory } from "../server/core/bundle.mjs";
+import { packPluginDirectory, BUNDLE_MARKER } from "../server/core/bundle.mjs";
 import { loadProfile } from "../server/core/profile.mjs";
 import {
   buildPlan,
@@ -12,6 +12,7 @@ import {
   verify,
   restorePlan,
   restore,
+  isManagedLocalPath,
 } from "../server/core/sync.mjs";
 
 async function fixture(t, { installed = false, patch = false } = {}) {
@@ -2529,4 +2530,128 @@ test("unmarked directory plugin with recorded source patch synthesizes unpatched
     await readFile(path.join(pluginDir, "index.js"), "utf8"),
     unpatchedCode,
   );
+});
+
+test("isManagedLocalPath groups plugins by real location across symlinked spellings", async () => {
+  // A linked daemon home leaves row.path spelled through a prefix that no
+  // longer participates in the string containment against home, plus macOS
+  // /var tmpdirs spell the base differently from its real location: derive
+  // the fixture from realpath-ed mkdtemp and decide on the realpath of the
+  // plugin path, like the other prefix-relative comparisons now do.
+  const base = await realpath(await mkdtemp(path.join(tmpdir(), "paseo-managed-")));
+  const home = path.join(base, "home");
+  const plugin = path.join(home, "local-plugins", "better-paseo");
+  try {
+    await mkdir(plugin, { recursive: true });
+    await writeFile(path.join(plugin, BUNDLE_MARKER), "{}", "utf8");
+    await symlink(home, path.join(base, "paseo-alias"), "junction");
+    // Managing decides on the real location: the plain spelling and a link
+    // spelling of the same directory both belong to the managed area.
+    assert.equal(await isManagedLocalPath(home, plugin), true);
+    assert.equal(
+      await isManagedLocalPath(home, path.join(base, "paseo-alias", "local-plugins", "better-paseo")),
+      true,
+    );
+    // A link inside local-plugins must not turn an outside directory managed.
+    const outside = path.join(base, "outside");
+    await mkdir(outside);
+    await writeFile(path.join(outside, BUNDLE_MARKER), "{}", "utf8");
+    await symlink(
+      outside,
+      path.join(home, "local-plugins", "escape"),
+      "junction",
+    );
+    assert.equal(
+      await isManagedLocalPath(home, path.join(home, "local-plugins", "escape")),
+      false,
+    );
+    // A missing path is not a managed installation either.
+    assert.equal(
+      await isManagedLocalPath(home, path.join(base, "paseo-alias", "local-plugins", "ghost")),
+      false,
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("bundle update refuses a plugin root that is itself a symlink", async () => {
+  // A plugin whose recorded installation path is spelled through a junction
+  // planted directly at the plugin root: the real-location check accepts the
+  // alias because its target lives inside the managed area, but a bundle
+  // update renames the destination — renaming this spelling moves the link
+  // itself and replaces it with a separate copy outside the managed area,
+  // leaving the real installation stale (Codex P2 on PR #23). A root that is
+  // a symlink joins the family's "the root itself is a symlink is refused"
+  // invariants (safeFile / prepareRepository); links in ancestors still
+  // resolve, like the link-spelled managed dir in the test above.
+  const base = await realpath(
+    await mkdtemp(path.join(tmpdir(), "paseo-symlink-root-")),
+  );
+  const home = path.join(base, "home");
+  const root = path.join(base, "repo");
+  const state = path.join(base, "state");
+  try {
+    await mkdir(path.join(home, "local-plugins"), { recursive: true });
+    await mkdir(root, { recursive: true });
+    await mkdir(state, { recursive: true });
+    const plugin = path.join(home, "local-plugins", "better-paseo");
+    await mkdir(plugin, { recursive: true });
+    await writeFile(path.join(plugin, "index.js"), "version 1;");
+    await writeFile(
+      path.join(plugin, BUNDLE_MARKER),
+      JSON.stringify({
+        source: "bundle:bundles/better-paseo.tar.gz",
+        revision: "r1",
+      }),
+      "utf8",
+    );
+    // The junction sits AT the plugin root: the location is managed, but a
+    // rename on this spelling would move the link.
+    const alias = path.join(base, "alias");
+    await symlink(plugin, alias, "junction");
+    assert.equal(await isManagedLocalPath(home, alias), false);
+
+    const sourceDir = path.join(base, "src");
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      path.join(sourceDir, "paseo-plugin.json"),
+      JSON.stringify({ id: "better-paseo", name: "Better Paseo" }),
+      "utf8",
+    );
+    await writeFile(path.join(sourceDir, "index.js"), "version 2;");
+    const packedV2 = await packPluginDirectory(sourceDir);
+    await mkdir(path.join(root, "bundles"), { recursive: true });
+    await writeFile(
+      path.join(root, "bundles", "better-paseo.tar.gz"),
+      packedV2.buffer,
+    );
+
+    const { installOrUpdateBundlePlugin } = await import(
+      "../server/core/sync.mjs"
+    );
+    const ctx = { home, root, state, adapter: { async reload() {} } };
+    await assert.rejects(
+      installOrUpdateBundlePlugin(
+        ctx,
+        {
+          id: "better-paseo",
+          source: "bundle:bundles/better-paseo.tar.gz",
+          revision: packedV2.sha256,
+        },
+        true,
+        alias,
+      ),
+      /root is a symlink/,
+    );
+    // The refusal leaves both spellings untouched: the alias still resolves
+    // to the untouched managed installation with its previous revision.
+    assert.equal((await lstat(alias)).isSymbolicLink(), true);
+    assert.equal(
+      await readFile(path.join(plugin, "index.js"), "utf8"),
+      "version 1;",
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });

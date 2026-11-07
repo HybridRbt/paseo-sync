@@ -210,12 +210,35 @@ export function createService({
   async function execute(c, input, phase) {
     await phase("checking");
     if (input.kind === "prepare") {
-      const homeRel = path.relative(c.home, c.s.checkout);
+      if (!path.isAbsolute(c.s.checkout))
+        throw new Error(
+          "Checkout must be an absolute path outside the Paseo home",
+        );
+      // Decide on the real location like context() does: a checkout whose
+      // realpath resolves inside the Paseo home must not be prepared just
+      // because its spelling runs through a link that keeps the string
+      // containment looking outside, and a legitimate outside checkout must
+      // not be refused because its spelling sits inside the home. prepare
+      // also seeds a missing checkout by clone, so a not-yet-existing path
+      // falls back to its nearest existing ancestor; when nothing in the
+      // chain exists yet, the spelling itself is the real location.
+      let canonical;
+      try {
+        canonical = await realpath(c.s.checkout);
+      } catch (e) {
+        if (e.code !== "ENOENT") throw e;
+        try {
+          canonical = await realpath(path.dirname(c.s.checkout));
+        } catch (inner) {
+          if (inner.code !== "ENOENT") throw inner;
+          canonical = path.resolve(c.s.checkout);
+        }
+      }
+      const homeRel = path.relative(c.home, canonical);
       if (
-        !path.isAbsolute(c.s.checkout) ||
-        (!homeRel.startsWith(".." + path.sep) &&
-          homeRel !== ".." &&
-          !path.isAbsolute(homeRel))
+        !homeRel.startsWith(".." + path.sep) &&
+        homeRel !== ".." &&
+        !path.isAbsolute(homeRel)
       )
         throw new Error(
           "Checkout must be an absolute path outside the Paseo home",
