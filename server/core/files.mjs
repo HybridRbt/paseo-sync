@@ -54,10 +54,12 @@ export async function safeFile(root, relative) {
   }
   return path.join(absoluteRoot, ...relative.split("/"));
 }
-// Windows antivirus scanners and sibling processes can briefly hold a handle on
-// files this plugin owns, surfacing as EPERM/EACCES/EBUSY on open or rename.
+// Windows briefly denies operations on files this plugin owns: reads collide
+// with scanner or sibling-process handles, and a lock directory recreated
+// right after its recursive delete is still delete-pending, failing the
+// temp-file create and the rename with EPERM/EACCES/EBUSY until it settles.
 // Retry those a few times with backoff; every other error propagates unchanged.
-async function retryShareConflict(operation) {
+const windowsRetry = async (operation) => {
   for (let attempt = 0; ; attempt++) {
     try {
       return await operation();
@@ -71,11 +73,11 @@ async function retryShareConflict(operation) {
       await new Promise((resolve) => setTimeout(resolve, 20 * 2 ** attempt));
     }
   }
-}
+};
 export async function bytesOrNull(file) {
   try {
     // Called through fs.readFile, not the named import, so tests can stub it.
-    return await retryShareConflict(() => fs.readFile(file));
+    return await windowsRetry(() => fs.readFile(file));
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw e;
@@ -89,8 +91,10 @@ export async function atomicWrite(file, data) {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporary, data, { mode: 0o600, flag: "wx" });
-    await retryShareConflict(() => fs.rename(temporary, file));
+    await windowsRetry(() =>
+      writeFile(temporary, data, { mode: 0o600, flag: "wx" }),
+    );
+    await windowsRetry(() => fs.rename(temporary, file));
   } finally {
     await rm(temporary, { force: true });
   }

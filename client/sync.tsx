@@ -62,6 +62,8 @@ export type Preview = {
   conflicts?: string[];
   preferProfile?: boolean;
   preferLocal?: boolean;
+  reinstallRegistry?: boolean;
+  skipped?: { plugin: string; reason: string }[];
   currentChangedSinceBackup?:
     | boolean
     | {
@@ -779,6 +781,9 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
                   ...(preview.backupId ? { backupId: preview.backupId } : {}),
                   ...(preview.preferProfile ? { preferProfile: true } : {}),
                   ...(preview.preferLocal ? { preferLocal: true } : {}),
+                  ...(preview.reinstallRegistry
+                    ? { reinstallRegistry: true }
+                    : {}),
                 })
               }
             >
@@ -843,6 +848,40 @@ export function SyncScreen({ theme, host }: PluginSurfaceProps) {
                 </Pressable>
               ) : null}
             </>
+          ) : null}
+          {preview.confirmKind === "apply" &&
+          !preview.reinstallRegistry &&
+          (preview.skipped?.some(
+            (s) => s.reason === "registry-version-transition",
+          ) ||
+            preview.conflicts?.some((c) =>
+              c.startsWith(
+                "Exact registry version transition is not supported:",
+              ),
+            )) ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("卸载重装注册表插件对齐（重新预览）")}
+              disabled={disabled}
+              style={{
+                padding: 14,
+                backgroundColor: theme.colors.surface1,
+                borderColor: theme.colors.border,
+                borderWidth: 1,
+                opacity: disabled ? 0.5 : 1,
+              }}
+              onPress={() =>
+                void run({
+                  kind: "plan",
+                  preferProfile: true,
+                  reinstallRegistry: true,
+                })
+              }
+            >
+              <Text style={text}>
+                {t("卸载重装注册表插件对齐（重新预览）")}
+              </Text>
+            </Pressable>
           ) : null}
           {preview.confirmKind === "publish" &&
           preview.conflicts?.length &&
@@ -1095,6 +1134,7 @@ export function ResultSummary({
     conflicts?: string[];
     preferProfile?: boolean;
     preferLocal?: boolean;
+    reinstallRegistry?: boolean;
     currentChangedSinceBackup?: Preview["currentChangedSinceBackup"];
     skipped?: {
       plugin: string;
@@ -1146,6 +1186,13 @@ export function ResultSummary({
         <Text selectable style={text}>
           {t(
             "已启用「用本机覆盖云端」模式：将忽略云端未应用的远端修改，直接导出本机当前配置。",
+          )}
+        </Text>
+      ) : null}
+      {r.reinstallRegistry ? (
+        <Text selectable style={text}>
+          {t(
+            "已启用「注册表插件重装对齐」模式：版本不一致的注册表插件将卸载并重装为云端固定版本。",
           )}
         </Text>
       ) : null}
@@ -1330,7 +1377,7 @@ export function ResultSummary({
               ) : null}
               <Text selectable style={text}>
                 {t(
-                  "该插件本次保持本机现状，未被同步修改。请先核对其安装来源或移除该安装（如 paseo plugin uninstall {plugin}），再重新预览差异。",
+                  "该插件本次保持本机现状，未被同步修改。请先核对其安装来源或移除该安装（如 paseo plugin remove {plugin}），再重新预览差异。",
                   { plugin: s.plugin },
                 )}
               </Text>
@@ -1350,12 +1397,20 @@ export function ResultSummary({
             </View>
           )
         ) : s.reason === "registry-version-transition" ? (
-          <Text key={s.plugin} style={text}>
-            {t(
-              "跳过 {plugin}：注册表安装插件不支持直接切换固定版本（本机 {head}，云端 {revision}），本次保留本机版本。",
-              { plugin: s.plugin, head: s.head, revision: s.revision },
-            )}
-          </Text>
+          <View key={s.plugin} style={{ gap: 4 }}>
+            <Text selectable style={text}>
+              {t(
+                "跳过 {plugin}：注册表安装插件不支持直接切换固定版本（本机 {head}，云端 {revision}），本次保留本机版本。",
+                { plugin: s.plugin, head: s.head, revision: s.revision },
+              )}
+            </Text>
+            <Text selectable style={text}>
+              {t(
+                "如需完全对齐 {plugin}，可点按「卸载重装注册表插件对齐（重新预览）」，用云端固定版本卸载并重装该插件。",
+                { plugin: s.plugin },
+              )}
+            </Text>
+          </View>
         ) : (
           <Text key={s.plugin} style={text}>
             {t("跳过 {plugin}：本机未安装，配置要求保持禁用。", {
@@ -1391,6 +1446,7 @@ export function ResultSummary({
                     ({
                       install: "安装",
                       update: "切换版本",
+                      reinstall: "卸载并重装",
                       enable: "启用",
                       disable: "停用",
                       reload: "重载",
@@ -1400,6 +1456,13 @@ export function ResultSummary({
                 .map((a) => t(a))
                 .join(", ")}
             </Text>
+            {c.actions.includes("reinstall") ? (
+              <Text selectable style={text}>
+                {t(
+                  "重装将按清单来源直装（npm 固定版本或 Git 固定提交），不再保留注册表安装来源；此后本机更新检查将使用该直装来源。",
+                )}
+              </Text>
+            ) : null}
             {c.settings?.map((s) => (
               <Text selectable key={s.document} style={text}>
                 {s.document}：{JSON.stringify(s.before)} →{" "}

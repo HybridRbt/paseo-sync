@@ -141,6 +141,7 @@ export function createService({
       backupId,
       preferProfile: !!ctx.preferProfile,
       preferLocal: !!ctx.preferLocal,
+      reinstallRegistry: !!ctx.reinstallRegistry,
     });
   async function preview(ctx, kind, backupId) {
     if (kind === "publish") {
@@ -249,6 +250,7 @@ export function createService({
       ...(await context(c)),
       preferProfile: Boolean(input.preferProfile),
       preferLocal: Boolean(input.preferLocal),
+      reinstallRegistry: Boolean(input.reinstallRegistry),
     };
     if (input.kind === "inspect")
       return {
