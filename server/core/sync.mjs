@@ -31,6 +31,7 @@ import {
   pluginIdentity,
   patchText,
   validateSettings,
+  normalizeSettings,
 } from "./profile.mjs";
 import {
   unpackBundle,
@@ -129,6 +130,46 @@ function preserveSkippedBaseline(state, previous, profile, ids) {
 }
 async function settingsFile(ctx, s) {
   return safeFile(ctx.home, `plugin-settings/${s.plugin}/${s.document}.json`);
+}
+/**
+ * Normalizes raw settings file bytes into canonical validated JSON string.
+ *
+ * @param {{ plugin: string, document: string }} s
+ * @param {Buffer | null} raw
+ * @returns {string | null}
+ */
+function normalizeSettingsBytes(s, raw) {
+  if (raw === null) return null;
+  const doc = normalizeSettings(JSON.parse(raw.toString("utf8")));
+  return JSON.stringify(validateSettings(s.plugin, s.document, doc));
+}
+// The live presentation document may still carry legacy spellings its plugin
+// migrates at read; every read of it goes through the same normalization, and
+// capture stores that canonical form so all comparisons (planning, baseline,
+// backup drift, concurrency guards) agree on one representation.
+/**
+ * Reads and normalizes live settings for a managed settings descriptor.
+ *
+ * @param {object} ctx
+ * @param {{ plugin: string, document: string }} s
+ * @returns {Promise<string | null>}
+ */
+async function readLiveSettings(ctx, s) {
+  const raw = await bytesOrNull(await settingsFile(ctx, s));
+  return normalizeSettingsBytes(s, raw);
+}
+/**
+ * Normalizes a base64-encoded settings snapshot into its canonical base64 representation.
+ *
+ * @param {{ plugin: string, document: string }} s
+ * @param {string | null | undefined} rawBase64
+ * @returns {string | null}
+ */
+function normalizeSettingsSnapshot(s, rawBase64) {
+  if (rawBase64 === null || rawBase64 === undefined) return null;
+  const raw = Buffer.from(rawBase64, "base64");
+  const live = normalizeSettingsBytes(s, raw);
+  return live === null ? null : Buffer.from(live).toString("base64");
 }
 // Removing an installation deletes its settings directory, and the profile
 // only manages its allowlisted documents: every other settings file under
@@ -452,7 +493,6 @@ async function capture(ctx, profile) {
       : null;
   }
   for (const s of profile.settings) {
-    const file = await settingsFile(ctx, s);
     if (
       skipMissingDisabled(
         ctx,
@@ -463,10 +503,9 @@ async function capture(ctx, profile) {
       settings[s.file] = null;
       continue;
     }
-    const raw = await bytesOrNull(file);
-    if (raw !== null)
-      validateSettings(s.plugin, s.document, JSON.parse(raw.toString("utf8")));
-    settings[s.file] = raw === null ? null : raw.toString("base64");
+    const live = await readLiveSettings(ctx, s);
+    settings[s.file] =
+      live === null ? null : Buffer.from(live).toString("base64");
   }
   for (const bundle of profile.patches) {
     const row = byId.get(bundle.plugin);
@@ -1026,11 +1065,12 @@ export async function applyPlan(ctx, approval) {
       const affectedSettings = profile.settings.filter((s) => s.plugin === id),
         bundle = profile.patches.find((x) => x.plugin === id);
       if (before?.descriptor?.enabled) await ctx.adapter.act("disable", id);
-      // A client may have saved while disable was in flight. Compare exact bytes.
+      // A client may have saved while disable was in flight. Compare the
+      // canonical form both sides were captured in.
       for (const s of affectedSettings) {
-        const raw = await bytesOrNull(await settingsFile(ctx, s));
+        const live = await readLiveSettings(ctx, s);
         if (
-          (raw === null ? null : raw.toString("base64")) !==
+          (live === null ? null : Buffer.from(live).toString("base64")) !==
           current.settings[s.file]
         )
           throw new Error(`Settings changed concurrently while stopping ${id}`);
@@ -1132,20 +1172,18 @@ export async function applyPlan(ctx, approval) {
       }
       for (const s of affectedSettings) {
         const file = await settingsFile(ctx, s),
-          raw = await bytesOrNull(file);
+          live = await readLiveSettings(ctx, s);
         // Removal deletes and reinstalling may recreate settings files, so
-        // the byte-for-byte guard only covers in-place version changes.
+        // the canonical-form guard only covers in-place version changes.
         if (
           !change.actions.includes("reinstall") &&
-          (raw === null ? null : raw.toString("base64")) !==
+          (live === null ? null : Buffer.from(live).toString("base64")) !==
             current.settings[s.file]
         )
           throw new Error(
             `Settings changed concurrently before write: ${s.file}`,
           );
-        if (
-          !same(raw === null ? null : JSON.parse(raw.toString("utf8")), s.data)
-        )
+        if (live === null || !same(JSON.parse(live), s.data))
           await writeJson(file, s.data);
       }
       // Only a reinstall removed the settings directory; its host-only
@@ -1402,9 +1440,9 @@ export async function restore(ctx, id, approval) {
     await writeJson(await backupFile(ctx, id), b);
     const assertCurrentSettings = async (plugin) => {
       for (const s of b.profile.settings.filter((x) => x.plugin === plugin)) {
-        const raw = await bytesOrNull(await settingsFile(ctx, s));
+        const live = await readLiveSettings(ctx, s);
         if (
-          (raw === null ? null : raw.toString("base64")) !==
+          (live === null ? null : Buffer.from(live).toString("base64")) !==
           preview._current.settings[s.file]
         )
           throw new Error(
@@ -1594,7 +1632,10 @@ export async function restore(ctx, id, approval) {
         )
           throw new Error(`Restore verification failed: ${p.id}`);
         for (const s of b.profile.settings.filter((x) => x.plugin === p.id))
-          if (restored.settings[s.file] !== b.before.settings[s.file])
+          if (
+            restored.settings[s.file] !==
+            normalizeSettingsSnapshot(s, b.before.settings[s.file])
+          )
             throw new Error(`Restore settings mismatch: ${s.file}`);
         for (const bundle of b.profile.patches.filter((x) => x.plugin === p.id))
           for (const f of bundle.data.files) {
