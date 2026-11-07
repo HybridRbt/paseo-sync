@@ -206,7 +206,7 @@ test("a live presentation document with legacy spellings previews, applies, and 
   // "Invalid fields; expected accent, ...".
   await writeJson(f.setting, {
     version: 1,
-    values: { previewWrap: true, rowLabels: true, hoverDelay: "500ms" },
+    values: { previewWrap: true, rowLabels: true, hoverDelay: "500ms", detailsTextZoom: 2 },
   });
   await writeJson(path.join(f.root, f.manifest.settings[0].file), {
     version: 1,
@@ -237,7 +237,7 @@ test("a live presentation document with legacy spellings previews, applies, and 
   // Reappearing in the legacy spelling of the synchronized state is not a change.
   await writeJson(f.setting, {
     version: 1,
-    values: { previewWrap: false, rowLabels: true, hoverDelay: "500ms" },
+    values: { previewWrap: false, rowLabels: true, hoverDelay: "500ms", detailsTextZoom: 2 },
   });
   p = await buildPlan(f.ctx);
   assert.equal(p.changes.length, 0);
@@ -266,7 +266,7 @@ test("restore succeeds when stored backup settings snapshot carries legacy spell
   const backup = JSON.parse(await readFile(bFile, "utf8"));
   const legacyBefore = {
     version: 1,
-    values: { previewWrap: false, rowLabels: true, hoverDelay: "500ms" },
+    values: { previewWrap: false, rowLabels: true, hoverDelay: "500ms", detailsTextZoom: 2 },
   };
   backup.before.settings["settings/better-paseo/presentation.json"] =
     Buffer.from(JSON.stringify(legacyBefore, null, 2)).toString("base64");

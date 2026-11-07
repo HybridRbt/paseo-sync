@@ -187,11 +187,11 @@ const flags = [
 // The live presentation document belongs to better-paseo, and that plugin
 // migrates two legacy spellings at read (shared/preferences-settings.ts):
 // rowLabels (an on/off switch before rowLabelStyle) and hoverDelay (fixed
-// steps before hoverDelaySeconds). The daemon keeps the stored spelling until
-// the plugin's next write, so a host document can still carry them. Reads of
-// the live document normalize through the same rules — mirroring them here —
-// while repository documents stay canonical: export writes the normalized
-// form, so a legacy spelling never enters the repository.
+// steps before hoverDelaySeconds), and drops retired fields such as detailsTextZoom.
+// The daemon keeps the stored spelling until the plugin's next write, so a host
+// document can still carry them. Reads of the live document normalize through the
+// same rules — mirroring them here — while repository documents stay canonical:
+// export writes the normalized form, so a legacy spelling never enters the repository.
 const LEGACY_HOVER_DELAYS = {
   "200ms": 0.2,
   "500ms": 0.5,
@@ -226,6 +226,16 @@ function migrateHoverDelay(values) {
     : { ...rest, hoverDelaySeconds: seconds };
 }
 /**
+ * Drops retired detailsTextZoom setting from older better-paseo versions.
+ *
+ * @param {Record<string, unknown>} values
+ * @returns {Record<string, unknown>}
+ */
+function migrateDetailsTextZoom(values) {
+  const { detailsTextZoom, ...rest } = values;
+  return rest;
+}
+/**
  * Normalizes legacy better-paseo presentation settings values to canonical fields.
  *
  * @param {unknown} d
@@ -233,7 +243,12 @@ function migrateHoverDelay(values) {
  */
 export function normalizeSettings(d) {
   if (!object(d) || !object(d.values)) return d;
-  return { ...d, values: migrateHoverDelay(migrateRowLabels(d.values)) };
+  return {
+    ...d,
+    values: migrateDetailsTextZoom(
+      migrateHoverDelay(migrateRowLabels(d.values)),
+    ),
+  };
 }
 /**
  * Validates better-paseo presentation settings document structure, versions, allowed keys, and values.
