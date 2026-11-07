@@ -170,8 +170,11 @@ export async function exportProfile(ctx) {
       } else {
         // Unbundled directory checkout without marker
         try {
+          // Best-effort probe of a foreign directory: skip the share-conflict
+          // retry so one inaccessible checkout cannot stall the export.
           const manifest = await jsonOrNull(
             await safeFile(row.path, "paseo-plugin.json"),
+            { retry: false },
           );
           if (!manifest) throw new Error("Missing paseo-plugin.json");
           const packed = await packPluginDirectory(row.path, {

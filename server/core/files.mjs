@@ -3,7 +3,6 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
-  readFile,
   rename,
   rm,
   writeFile,
@@ -55,40 +54,46 @@ export async function safeFile(root, relative) {
   }
   return path.join(absoluteRoot, ...relative.split("/"));
 }
-export async function bytesOrNull(file) {
+// Windows briefly denies operations on files this plugin owns: reads collide
+// with scanner or sibling-process handles, and a lock directory recreated
+// right after its recursive delete is still delete-pending, failing the
+// temp-file create and the rename with EPERM/EACCES/EBUSY until it settles.
+// Retry those a few times with backoff; every other error propagates unchanged.
+const windowsRetry = async (operation) => {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (
+        process.platform !== "win32" ||
+        !["EPERM", "EACCES", "EBUSY"].includes(error.code) ||
+        attempt >= 5
+      )
+        throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20 * 2 ** attempt));
+    }
+  }
+};
+export async function bytesOrNull(file, { retry = true } = {}) {
   try {
-    return await readFile(file);
+    // Called through fs.readFile, not the named import, so tests can stub it.
+    const read = () => fs.readFile(file);
+    // Best-effort probes of foreign plugin paths pass retry:false so an
+    // inaccessible manifest fails fast instead of stalling a whole batch
+    // preview with one full retry budget per miss.
+    return await (retry ? windowsRetry(read) : read());
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw e;
   }
 }
-export async function jsonOrNull(file) {
-  const data = await bytesOrNull(file);
+export async function jsonOrNull(file, opts) {
+  const data = await bytesOrNull(file, opts);
   return data === null ? null : JSON.parse(data.toString("utf8"));
 }
 export async function atomicWrite(file, data) {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${randomUUID()}.tmp`;
-  // A lock directory recreated right after its recursive delete (one
-  // operation finishing, the next starting immediately) can still be in
-  // Windows' delete-pending state: both creating the temporary file and the
-  // rename below fail with EPERM/EACCES/EBUSY until the delete completes.
-  const windowsRetry = async (operation) => {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await operation();
-      } catch (error) {
-        if (
-          process.platform !== "win32" ||
-          !["EPERM", "EACCES", "EBUSY"].includes(error.code) ||
-          attempt >= 5
-        )
-          throw error;
-        await new Promise((resolve) => setTimeout(resolve, 20 * 2 ** attempt));
-      }
-    }
-  };
   try {
     await windowsRetry(() =>
       writeFile(temporary, data, { mode: 0o600, flag: "wx" }),

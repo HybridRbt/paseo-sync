@@ -116,6 +116,7 @@ export function createService({
       try {
         const manifest = await jsonOrNull(
           await safeFile(row.path, "paseo-plugin.json"),
+          { retry: false },
         );
         if (manifest?.id === "paseo-sync") selfIds.push(row.id);
       } catch {
