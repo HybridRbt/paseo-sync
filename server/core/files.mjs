@@ -70,12 +70,14 @@ export async function jsonOrNull(file) {
 export async function atomicWrite(file, data) {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, data, { mode: 0o600, flag: "wx" });
+  // A lock directory recreated right after its recursive delete (one
+  // operation finishing, the next starting immediately) can still be in
+  // Windows' delete-pending state: both creating the temporary file and the
+  // rename below fail with EPERM/EACCES/EBUSY until the delete completes.
+  const windowsRetry = async (operation) => {
     for (let attempt = 0; ; attempt++) {
       try {
-        await fs.rename(temporary, file);
-        break;
+        return await operation();
       } catch (error) {
         if (
           process.platform !== "win32" ||
@@ -86,6 +88,12 @@ export async function atomicWrite(file, data) {
         await new Promise((resolve) => setTimeout(resolve, 20 * 2 ** attempt));
       }
     }
+  };
+  try {
+    await windowsRetry(() =>
+      writeFile(temporary, data, { mode: 0o600, flag: "wx" }),
+    );
+    await windowsRetry(() => fs.rename(temporary, file));
   } finally {
     await rm(temporary, { force: true });
   }
