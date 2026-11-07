@@ -136,6 +136,17 @@ async function installedFile(ctx, row, name) {
     );
   return safeFile(ctx.home, `${segments.join("/")}/${name}`);
 }
+// A plugin root that is itself a symlink is refused before destinations are
+// derived from its spelling: rename() moves the link itself, so consuming
+// such a spelling would split the installation out of the managed area.
+async function symlinkedRoot(p) {
+  try {
+    return (await lstat(p)).isSymbolicLink();
+  } catch {
+    return false; // missing or unreachable roots stay with the other checks
+  }
+}
+
 export async function isManagedLocalPath(home, pluginPath) {
   if (!pluginPath || !path.isAbsolute(pluginPath)) return false;
   // Managing is a real-location decision, like the other prefix-relative
@@ -143,17 +154,24 @@ export async function isManagedLocalPath(home, pluginPath) {
   // carry symlink components (a linked home or macOS /var checkouts), so
   // both sides resolve to their real locations before comparing. A link
   // inside local-plugins escaping the boundary groups as unmanaged, a
-  // missing local-plugins root or missing plugin path is not managed.
+  // missing local-plugins root or missing plugin path is not managed, and
+  // neither is a plugin root that is itself a symlink: bundle updates
+  // rename the destination, so renaming a link spelling would consume the
+  // alias and republish the bundle as a separate copy outside the managed
+  // area (Codex P2 on PR #23). That joins the safeFile/prepareRepository
+  // invariants — links in ancestor components still resolve.
   const local = path.join(home, "local-plugins");
-  let actualLocal, actualPlugin;
+  let actualLocal, actualPlugin, rootStat;
   try {
-    [actualLocal, actualPlugin] = await Promise.all([
+    [actualLocal, actualPlugin, rootStat] = await Promise.all([
       realpath(local),
       realpath(pluginPath),
+      lstat(pluginPath),
     ]);
   } catch {
     return false;
   }
+  if (rootStat?.isSymbolicLink()) return false;
   const rel = path.relative(actualLocal, actualPlugin);
   return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
@@ -235,6 +253,17 @@ export async function installOrUpdateBundlePlugin(
       : path.join(ctx.home, "local-plugins", target.id);
 
   if (isUpdate) {
+    // Refuse a plugin root that is itself a symlink before authorizing the
+    // update (Codex P2 on PR #23): rename() would move the link and replace
+    // it with a staged copy, consuming the alias while the real managed
+    // installation stays stale. Refusing the spelling at the plugin root is
+    // explicit and distinct from an external checkout, which the check below
+    // keeps reporting for other unmanaged locations.
+    if (existingPath && (await symlinkedRoot(existingPath))) {
+      throw new Error(
+        `Cannot update a plugin directory whose root is a symlink: ${target.id} (${existingPath})`,
+      );
+    }
     if (!existingPath || !(await isManagedLocalPath(ctx.home, existingPath))) {
       throw new Error(
         `Cannot update external plugin checkout with bundle: ${target.id} (${existingPath})`,
