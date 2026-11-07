@@ -624,7 +624,12 @@ async function planData(ctx) {
       target,
       selfId,
     );
-    if (
+    // An exact registry version transition cannot be expressed as an in-place
+    // update (the daemon only offers approved registry upgrades). Under
+    // preferProfile it stays a disclosed skip; the explicit reinstall mode
+    // aligns it by uninstalling and reinstalling the profile's pinned
+    // revision instead.
+    const registryTransition =
       blocked &&
       ctx.preferProfile &&
       now &&
@@ -633,8 +638,8 @@ async function planData(ctx) {
       now.source === target.source &&
       (now.pluginPath ?? ".") === (target.pluginPath ?? ".") &&
       target.id !== selfId &&
-      target.id !== "paseo-sync"
-    ) {
+      target.id !== "paseo-sync";
+    if (registryTransition && !ctx.reinstallRegistry) {
       skipped.push({
         plugin: target.id,
         reason: "registry-version-transition",
@@ -643,8 +648,13 @@ async function planData(ctx) {
       });
       continue;
     }
-    if (blocked) conflicts.push(blocked);
-    if (!sameVersion) actions.push(now ? "update" : "install");
+    // A registry transition handled as a reinstall is disclosed by its
+    // change entry, not as a blocking conflict.
+    if (blocked && !registryTransition) conflicts.push(blocked);
+    if (!sameVersion)
+      actions.push(
+        registryTransition ? "reinstall" : now ? "update" : "install",
+      );
     const bundle = profile.patches.find((x) => x.plugin === target.id);
     if (bundle) {
       let needsPatch = !sameVersion;
@@ -707,12 +717,14 @@ async function planData(ctx) {
     current: comparable(current),
     previous,
     preferProfile: !!ctx.preferProfile,
+    reinstallRegistry: !!ctx.reinstallRegistry,
   });
   const plan = {
     schemaVersion: 1,
     profileHash: profile.hash,
     approval,
     preferProfile: !!ctx.preferProfile,
+    reinstallRegistry: !!ctx.reinstallRegistry,
     changes,
     skipped,
     conflicts,
@@ -936,6 +948,15 @@ export async function applyPlan(ctx, approval) {
           await ctx.adapter.update(target);
         }
       }
+      if (change.actions.includes("reinstall")) {
+        // The daemon cannot express an exact registry version transition as
+        // an update; align by uninstalling and installing the pinned revision.
+        await ctx.adapter.act("uninstall", id);
+        await ctx.adapter.install(target);
+        const row = (await ctx.adapter.list()).find((x) => x.id === id);
+        if (!row) throw new Error(`Install returned no plugin: ${id}`);
+        if (row.enabled) await ctx.adapter.act("disable", id);
+      }
       const row = (await ctx.adapter.list()).find((x) => x.id === id);
       if (!row) throw new Error(`Missing plugin after install: ${id}`);
       const installed =
@@ -961,10 +982,12 @@ export async function applyPlan(ctx, approval) {
       for (const s of affectedSettings) {
         const file = await settingsFile(ctx, s),
           raw = await bytesOrNull(file);
-        // Installation may recreate defaults. Preserve the original check for same-version changes.
+        // Uninstalling removes and reinstalling may recreate settings files,
+        // so the byte-for-byte guard only covers in-place version changes.
         if (
+          !change.actions.includes("reinstall") &&
           (raw === null ? null : raw.toString("base64")) !==
-          current.settings[s.file]
+            current.settings[s.file]
         )
           throw new Error(
             `Settings changed concurrently before write: ${s.file}`,
@@ -1030,6 +1053,7 @@ export async function restorePlan(ctx, id) {
       .every((p) => Object.hasOwn(p, "sourceState"));
   const conflicts = [],
     skipped = [];
+  const registryRollbacks = new Set();
   if (b.after === null || b.status === "pending" || b.status === "restoring")
     conflicts.push(
       "Interrupted backup has no verified final state; inspect daemon state before restoring.",
@@ -1072,12 +1096,26 @@ export async function restorePlan(ctx, id) {
       continue;
     }
     if (before) {
-      const conflict = transitionConflict(
-        now?.descriptor ?? null,
-        before.descriptor,
-        ctx.selfIds?.includes(plugin) ? plugin : ctx.selfId,
-      );
-      if (conflict) conflicts.push(conflict);
+      // An exact registry version transition cannot be expressed as an
+      // in-place update, so restoring the backed-up pinned revision
+      // uninstalls and reinstalls it (mirroring the apply-side reinstall)
+      // instead of refusing the whole restore.
+      const nowDescriptor = now?.descriptor ?? null;
+      const registryRollback =
+        nowDescriptor?.registry &&
+        nowDescriptor.revision !== before.descriptor.revision &&
+        nowDescriptor.source === before.descriptor.source &&
+        (nowDescriptor.pluginPath ?? ".") ===
+          (before.descriptor.pluginPath ?? ".");
+      if (registryRollback) registryRollbacks.add(plugin);
+      else {
+        const conflict = transitionConflict(
+          nowDescriptor,
+          before.descriptor,
+          ctx.selfIds?.includes(plugin) ? plugin : ctx.selfId,
+        );
+        if (conflict) conflicts.push(conflict);
+      }
       if (before.descriptor?.source?.startsWith("bundle:")) {
         const archive = await getBundleArchive(ctx, before.descriptor);
         if (!archive) {
@@ -1130,7 +1168,7 @@ export async function restorePlan(ctx, id) {
       .filter((p) => !skippedIds.has(p.id))
       .map((p) => ({
         plugin: p.id,
-        actions: ["restore"],
+        actions: [registryRollbacks.has(p.id) ? "reinstall" : "restore"],
         from: current.plugins[p.id]?.descriptor ?? null,
         to: b.before.plugins[p.id]?.descriptor ?? { ...p, enabled: false },
         settings: b.profile.settings
@@ -1240,6 +1278,15 @@ export async function restore(ctx, id, approval) {
             ctx,
           )) ?? snapshotPlugin(row))
         : null;
+      // Registry rollback uses uninstall + install of the backed-up pinned
+      // revision, exactly like the apply-side reinstall mode.
+      const registryRollback =
+        currentDescriptor?.registry &&
+        row &&
+        currentDescriptor.revision !== before.descriptor.revision &&
+        currentDescriptor.source === before.descriptor.source &&
+        (currentDescriptor.pluginPath ?? ".") ===
+          (before.descriptor.pluginPath ?? ".");
       if (
         !row ||
         !same(
@@ -1257,13 +1304,18 @@ export async function restore(ctx, id, approval) {
             !!row,
             row?.path,
           );
+        } else if (registryRollback) {
+          await ctx.adapter.act("uninstall", target.id);
+          await ctx.adapter.install(before.descriptor);
         } else {
           if (row) await ctx.adapter.update(before.descriptor);
           else await ctx.adapter.install(before.descriptor);
         }
         row = (await ctx.adapter.list()).find((x) => x.id === target.id);
         if (row?.enabled) await ctx.adapter.act("disable", target.id);
-        await assertCurrentSettings(target.id);
+        // Uninstall/reinstall legitimately removes and recreates settings
+        // files, so the byte-for-byte guard only covers in-place moves.
+        if (!registryRollback) await assertCurrentSettings(target.id);
       }
       for (const bundle of b.profile.patches.filter(
         (x) => x.plugin === target.id,
@@ -1279,7 +1331,9 @@ export async function restore(ctx, id, approval) {
       for (const s of b.profile.settings.filter(
         (x) => x.plugin === target.id,
       )) {
-        await assertCurrentSettings(target.id);
+        // After a registry rollback the settings baseline was reset by
+        // uninstall/reinstall; the backup bytes are written unconditionally.
+        if (!registryRollback) await assertCurrentSettings(target.id);
         const file = await settingsFile(ctx, s),
           raw = b.before.settings[s.file];
         if (raw === null) await rm(file, { force: true });

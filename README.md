@@ -41,7 +41,7 @@ paseo plugin install git:https://github.com/HybridRbt/paseo-sync --ref v0.1.2
 | 内容 | 首版行为 |
 | --- | --- |
 | npm、HTTPS Git 固定版本 | 首次安装，以及同来源的明确版本更新；执行后核验实际版本。 |
-| registry 安装的既有插件 | 相同版本可同步状态和设置；版本变化会阻止，避免绕过审核版本约束。 |
+| registry 安装的既有插件 | 相同版本可同步状态和设置；版本变化默认跳过并披露。选择「忽略本机改动，用云端覆盖本机」后可再一键「卸载重装注册表插件对齐」，卸载并按云端固定版本重装，完成全部对齐；恢复备份时同样以卸载重装回滚版本。 |
 | 来源切换 | 明确阻止，需要单独迁移，不自动卸载重装。 |
 | 禁用插件 | 可更新已存在且禁用的插件；缺失且目标禁用时明确跳过，不安装、不写入其设置或补丁，也不阻塞其他插件；验证将其视为满足禁用意图。 |
 | Better Paseo | 仅 `presentation` 中审核过的字段。未知字段拒绝，不能扫整个设置目录。 |
@@ -56,7 +56,7 @@ paseo plugin install git:https://github.com/HybridRbt/paseo-sync --ref v0.1.2
 
 任务在服务端执行，切换界面后可继续查看。失败会保留任务状态与备份 ID；在“恢复”中列出备份，输入 ID 预览，确认后恢复。Cafe 备份使用 `cafe:` 前缀。
 
-新安装插件在恢复时停用并保留，避免删除数据。已有插件使用明确的 update 恢复版本，无法表达的 registry 转换会拒绝。本机源码脏的 Git 插件在恢复时跳过并披露，保持本机现状不被重装覆盖；该插件不在结束快照比对范围内，完成本次恢复后在源码仓库提交并推送、运行 `paseo plugin update`，再重新预览即可恢复备份中的版本。其余当前状态与操作结束快照比对；若备份后有后续本地修改（插件、设置、补丁或源码漂移），预览明确披露漂移内容与文件并禁用确认，拒绝盲目覆盖。
+新安装插件在恢复时停用并保留，避免删除数据。已有插件使用明确的 update 恢复版本；registry 安装插件的版本回退无法用 update 表达，恢复时改为卸载并按备份固定版本重装，预览以「卸载并重装」披露。本机源码脏的 Git 插件在恢复时跳过并披露，保持本机现状不被重装覆盖；该插件不在结束快照比对范围内，完成本次恢复后在源码仓库提交并推送、运行 `paseo plugin update`，再重新预览即可恢复备份中的版本。其余当前状态与操作结束快照比对；若备份后有后续本地修改（插件、设置、补丁或源码漂移），预览明确披露漂移内容与文件并禁用确认，拒绝盲目覆盖。
 
 进程异常退出会将任务标为 `interrupted`。先检查 daemon 实际状态、备份和锁，再解除锁；不能把中断视为成功。没有结束快照的备份不能自动恢复。普通恢复失败会记录新结束快照和原备份 ID，可在重新检查差异后重试。首版保留所有备份，不自动清理，也不自动重新执行修改命令。
 
@@ -68,6 +68,7 @@ paseo plugin install git:https://github.com/HybridRbt/paseo-sync --ref v0.1.2
 node tools/paseo-profile.mjs inspect --repo /absolute/path/to/private-profile
 node tools/paseo-profile.mjs plan --repo /absolute/path/to/private-profile
 node tools/paseo-profile.mjs apply --repo /absolute/path/to/private-profile --approve <plan.approval>
+node tools/paseo-profile.mjs plan --repo /absolute/path/to/private-profile --prefer-profile --reinstall-registry
 node tools/paseo-profile.mjs verify --repo /absolute/path/to/private-profile
 ```
 

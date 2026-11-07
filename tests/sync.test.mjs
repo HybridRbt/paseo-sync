@@ -98,6 +98,7 @@ async function fixture(t, { installed = false, patch = false } = {}) {
               kind: "npm",
               packageName: p.source.slice(4),
               pluginPath: ".",
+              ...(p.registry ? { registry: p.registry } : {}),
             },
             currentRevision: p.revision,
           },
@@ -129,6 +130,14 @@ async function fixture(t, { installed = false, patch = false } = {}) {
       if (action === "enable" || action === "reload") {
         row.enabled = true;
         row.status = "running";
+      }
+      if (action === "uninstall") {
+        // Uninstalling removes the plugin's code and its settings directory.
+        rows = rows.filter((x) => x.id !== id);
+        await rm(path.join(home, "plugin-settings", id), {
+          recursive: true,
+          force: true,
+        });
       }
     },
   };
@@ -2008,6 +2017,151 @@ test("preferProfile skips unsupported registry version transitions as disclosed 
     previewWrap: true,
     previewStripes: true,
   });
+});
+
+test("reinstallRegistry aligns a registry version transition end to end and its backup restores through reinstall", async (t) => {
+  const f = await fixture(t, { installed: true });
+  // The plugin came from a Paseo registry listing, and the daemon only offers
+  // approved registry upgrades: the host drifted to 2.0.0 (with local
+  // settings edits) while the profile pins the reviewed 1.0.0.
+  f.manifest.plugins[0].registry = {
+    url: "https://plugins.paseo.sh",
+    id: "example/demo",
+  };
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  // Simulate the persistent host drift through the adapter itself: the
+  // daemon upgraded the plugin to 2.0.0 from the registry listing.
+  await f.adapter.act("uninstall", "better-paseo");
+  await f.adapter.install({
+    ...f.plugin,
+    revision: "2.0.0",
+    registry: { url: "https://plugins.paseo.sh", id: "example/demo" },
+  });
+  f.calls.length = 0;
+  await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
+
+  const normal = await buildPlan(f.ctx);
+  assert.ok(
+    normal.conflicts.some((x) => /Local changes conflict/i.test(x)),
+  );
+  assert.ok(
+    normal.conflicts.some((x) => /Exact registry version transition/i.test(x)),
+  );
+
+  const preferred = await buildPlan({ ...f.ctx, preferProfile: true });
+  assert.equal(preferred.reinstallRegistry, false);
+  assert.deepEqual(preferred.skipped, [
+    {
+      plugin: "better-paseo",
+      reason: "registry-version-transition",
+      head: "2.0.0",
+      revision: "1.0.0",
+    },
+  ]);
+
+  const plan = await buildPlan({
+    ...f.ctx,
+    preferProfile: true,
+    reinstallRegistry: true,
+  });
+  assert.equal(plan.reinstallRegistry, true);
+  assert.deepEqual(plan.skipped, []);
+  assert.deepEqual(plan.conflicts, []);
+  assert.deepEqual(plan.changes.map((c) => c.actions), [
+    ["reinstall", "settings:presentation"],
+  ]);
+  assert.equal(plan.changes[0].from.revision, "2.0.0");
+  assert.equal(plan.changes[0].to.revision, "1.0.0");
+  assert.notEqual(plan.approval, preferred.approval);
+
+  const applied = await applyPlan(
+    { ...f.ctx, preferProfile: true, reinstallRegistry: true },
+    plan.approval,
+  );
+  assert.equal(applied.changed, true);
+  assert.equal(applied.verification.configurationMatches, true);
+  assert.ok(
+    f.calls.some(([a, id]) => a === "uninstall" && id === "better-paseo"),
+  );
+  assert.ok(
+    f.calls.some(
+      ([a, id, rev]) =>
+        a === "install" && id === "better-paseo" && rev === "1.0.0",
+    ),
+  );
+  assert.ok(!f.calls.some(([a]) => a === "update"));
+  // Uninstall removed the settings directory; the reinstall path still
+  // rewrites the profile settings instead of tripping the concurrency guard.
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")).values, {
+    previewWrap: true,
+  });
+  const alignedRow = (await f.adapter.list())[0];
+  assert.equal(alignedRow.installation.currentRevision, "1.0.0");
+  assert.deepEqual(alignedRow.installation.identity.registry, {
+    url: "https://plugins.paseo.sh",
+    id: "example/demo",
+  });
+  // The host is now fully aligned: a plain plan has nothing left to do.
+  const aligned = await buildPlan(f.ctx);
+  assert.deepEqual(aligned.changes, []);
+  assert.deepEqual(aligned.conflicts, []);
+  assert.deepEqual(aligned.skipped, []);
+
+  // The backup produced by the reinstall rolls back through reinstall too.
+  const restorePreview = await restorePlan(f.ctx, applied.backupId);
+  assert.deepEqual(restorePreview.conflicts, []);
+  assert.deepEqual(
+    restorePreview.changes.map((c) => c.actions),
+    [["reinstall"]],
+  );
+  assert.equal(restorePreview.changes[0].to.revision, "2.0.0");
+  f.calls.length = 0;
+  await restore(f.ctx, applied.backupId, restorePreview.approval);
+  assert.ok(
+    f.calls.some(([a, id]) => a === "uninstall" && id === "better-paseo"),
+  );
+  assert.ok(
+    f.calls.some(
+      ([a, id, rev]) =>
+        a === "install" && id === "better-paseo" && rev === "2.0.0",
+    ),
+  );
+  const restoredRow = (await f.adapter.list())[0];
+  assert.equal(restoredRow.installation.currentRevision, "2.0.0");
+  // The backed-up local settings drift comes back with the rollback.
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")).values, {
+    previewWrap: false,
+  });
+});
+
+test("registry reinstall disclosures and action labels render bilingually", async () => {
+  const { translator, formatConflict } = await import("../client/i18n.mjs");
+  const english = translator("en");
+  assert.ok(
+    english("卸载重装注册表插件对齐（重新预览）").includes(
+      "Reinstall registry plugins to align",
+    ),
+  );
+  assert.ok(english("卸载并重装").includes("reinstall"));
+  assert.ok(
+    english(
+      "已启用「注册表插件重装对齐」模式：版本不一致的注册表插件将卸载并重装为云端固定版本。",
+    ).includes("Registry reinstall alignment"),
+  );
+  for (const language of ["zh", "en"]) {
+    const line =
+      "如需完全对齐 {plugin}，可点按「卸载重装注册表插件对齐（重新预览）」，用云端固定版本卸载并重装该插件。";
+    const translated = translator(language)(line, { plugin: "better-paseo" });
+    assert.ok(translated.includes("better-paseo"));
+    assert.notEqual(translated, line);
+  }
+  assert.ok(
+    formatConflict(
+      "Exact registry version transition is not supported: better-paseo. Review registry provenance separately; no reinstall will be attempted.",
+      english,
+    ).includes("Reinstall registry plugins to align"),
+  );
 });
 
 test("an untracked installation sharing the target id is disclosed and skipped instead of crashing apply", async (t) => {

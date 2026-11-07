@@ -368,14 +368,14 @@ test("formatConflict and overwrite mode translations render bilingually", async 
       "Exact registry version transition is not supported: paseo-cafe. Review registry provenance separately; no reinstall will be attempted.",
       zh,
     ),
-    "注册表安装的插件不支持直接切换历史版本：paseo-cafe。可选择「用本机配置覆盖云端」，或选择「用云端覆盖本机」以跳过该插件版本切换。",
+    "注册表安装的插件不支持直接切换历史版本：paseo-cafe。可选择「用本机配置覆盖云端」，或选择「用云端覆盖本机」保留本机版本，或选择「卸载重装注册表插件对齐」直接重装云端固定版本。",
   );
   assert.equal(
     formatConflict(
       "Exact registry version transition is not supported: paseo-cafe. Review registry provenance separately; no reinstall will be attempted.",
       en,
     ),
-    "Exact registry version transition is not supported: paseo-cafe. Choose “Overwrite cloud with this host”, or choose “Apply cloud profile” to skip this plugin's version transition.",
+    "Exact registry version transition is not supported: paseo-cafe. Choose “Overwrite cloud with this host”, “Apply cloud profile” to keep the host version, or “Reinstall registry plugins to align” to reinstall the pinned cloud version.",
   );
   assert.equal(
     formatConflict(

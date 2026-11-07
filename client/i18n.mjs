@@ -13,10 +13,17 @@ const english = {
     "Skipped {plugin}: the install source is not identifiable from the backup or on this host; the restore leaves the plugin untouched.",
   "跳过 {plugin}：注册表安装插件不支持直接切换固定版本（本机 {head}，云端 {revision}），本次保留本机版本。":
     "Skipped {plugin}: registry-installed plugins do not support in-place version pinning (host {head}, cloud {revision}); keeping host version.",
+  "如需完全对齐 {plugin}，可点按「卸载重装注册表插件对齐（重新预览）」，用云端固定版本卸载并重装该插件。":
+    "To fully align {plugin}, tap “Reinstall registry plugins to align (re-preview)” to uninstall and reinstall the plugin at the pinned cloud version.",
+  "卸载重装注册表插件对齐（重新预览）":
+    "Reinstall registry plugins to align (re-preview)",
+  "已启用「注册表插件重装对齐」模式：版本不一致的注册表插件将卸载并重装为云端固定版本。":
+    "“Registry reinstall alignment” mode enabled: registry plugins with differing versions will be uninstalled and reinstalled at the pinned cloud version.",
+  "卸载并重装": "Uninstall and reinstall",
   "本机配置与云端存在冲突：{label}。可选择「用本机配置覆盖云端」或「忽略本机改动，用云端覆盖本机」。":
     "Local changes conflict with the cloud profile: {label}. Choose “Overwrite cloud with this host” or “Ignore local changes and apply cloud profile”.",
-  "注册表安装的插件不支持直接切换历史版本：{plugin}。可选择「用本机配置覆盖云端」，或选择「用云端覆盖本机」以跳过该插件版本切换。":
-    "Exact registry version transition is not supported: {plugin}. Choose “Overwrite cloud with this host”, or choose “Apply cloud profile” to skip this plugin's version transition.",
+  "注册表安装的插件不支持直接切换历史版本：{plugin}。可选择「用本机配置覆盖云端」，或选择「用云端覆盖本机」保留本机版本，或选择「卸载重装注册表插件对齐」直接重装云端固定版本。":
+    "Exact registry version transition is not supported: {plugin}. Choose “Overwrite cloud with this host”, “Apply cloud profile” to keep the host version, or “Reinstall registry plugins to align” to reinstall the pinned cloud version.",
   "云端配置仓库存在尚未应用到本机的插件变更：{plugin}。可先同步到本机，或选择「强制用本机配置覆盖云端」。":
     "The configuration repository has unapplied changes for {plugin}. Sync to this host first, or choose “Force overwrite cloud with this host”.",
   "云端配置仓库存在尚未应用到本机的设置变更：{file}。可先同步到本机，或选择「强制用本机配置覆盖云端」。":
@@ -412,7 +419,7 @@ export function formatConflict(conflict, t) {
   );
   if (mRegistry) {
     return t(
-      "注册表安装的插件不支持直接切换历史版本：{plugin}。可选择「用本机配置覆盖云端」，或选择「用云端覆盖本机」以跳过该插件版本切换。",
+      "注册表安装的插件不支持直接切换历史版本：{plugin}。可选择「用本机配置覆盖云端」，或选择「用云端覆盖本机」保留本机版本，或选择「卸载重装注册表插件对齐」直接重装云端固定版本。",
       { plugin: mRegistry[1] },
     );
   }

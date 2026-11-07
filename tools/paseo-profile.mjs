@@ -26,8 +26,8 @@ const help = `Paseo configuration profile (Node.js >=22.18, Paseo >=0.11.4)
 
 node tools/paseo-profile.mjs inspect
 node tools/paseo-profile.mjs export
-node tools/paseo-profile.mjs plan [--prefer-profile]
-node tools/paseo-profile.mjs apply --approve <plan.approval> [--prefer-profile]
+node tools/paseo-profile.mjs plan [--prefer-profile] [--reinstall-registry]
+node tools/paseo-profile.mjs apply --approve <plan.approval> [--prefer-profile] [--reinstall-registry]
 node tools/paseo-profile.mjs verify
 node tools/paseo-profile.mjs restore --backup <id> [--approve <restore.approval>]
 
@@ -35,6 +35,8 @@ Options: --repo <directory> --home <local Paseo home> --paseo <CLI path>
 All operations target the LOCAL daemon. There is no remote-host option.
 Without --approve, apply refuses changes; restore only previews.
 --prefer-profile explicitly resolves local baseline conflicts in favor of the repository.
+--reinstall-registry (requires --prefer-profile) also aligns registry plugins whose
+installed version differs by uninstalling and reinstalling the pinned revision.
 Credentials, pairing data, sessions and arbitrary plugin data are never synchronized.
 `;
 try {
@@ -47,6 +49,7 @@ try {
       approve: { type: "string" },
       backup: { type: "string" },
       "prefer-profile": { type: "boolean" },
+      "reinstall-registry": { type: "boolean" },
       help: { type: "boolean" },
     },
   });
@@ -71,6 +74,12 @@ try {
     throw new Error("--backup only applies to restore");
   if (values["prefer-profile"] && !["plan", "apply"].includes(command))
     throw new Error("--prefer-profile only applies to plan/apply");
+  if (values["reinstall-registry"]) {
+    if (!["plan", "apply"].includes(command))
+      throw new Error("--reinstall-registry only applies to plan/apply");
+    if (!values["prefer-profile"])
+      throw new Error("--reinstall-registry requires --prefer-profile");
+  }
   const root = await realpath(path.resolve(values.repo ?? process.cwd()));
   const home = await realpath(
     path.resolve(
@@ -99,6 +108,7 @@ try {
       lockRoot,
       adapter,
       preferProfile: values["prefer-profile"] === true,
+      reinstallRegistry: values["reinstall-registry"] === true,
     };
   const daemonStatus = await adapter.status();
   if (command !== "inspect") assertDaemonVersion(daemonStatus.daemonVersion);
