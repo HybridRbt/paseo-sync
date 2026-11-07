@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -204,4 +204,100 @@ test("service threads preferProfile and preferLocal through preview and executio
   assert.equal(mismatchPub.status, "failed");
   assert.match(mismatchPub.error, /stale/i);
 });
+
+async function prepareFixture(baseLayout) {
+  // macOS /var tmpdirs spell the base differently from its real location,
+  // so every fixture path is derived from the realpath-ed mkdtemp dir.
+  const base = await realpath(
+    await mkdtemp(path.join(tmpdir(), "paseo-prepare-")),
+  );
+  const home = path.join(base, "home");
+  await mkdir(home);
+  const repoDir = baseLayout(base, home);
+  await mkdir(path.dirname(repoDir), { recursive: true });
+  await mkdir(repoDir);
+  await writeJson(path.join(repoDir, "profile.json"), {
+    schemaVersion: 1,
+    plugins: [],
+    settings: [],
+    patches: [],
+  });
+  const git = (...a) =>
+    execFileSync("git", ["-c", "core.fsmonitor=false", "-C", repoDir, ...a], {
+      stdio: "pipe",
+    });
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "init");
+  return base;
+}
+
+async function prepareService(base, checkout) {
+  const settings = {
+      checkout,
+      daemonHome: path.join(base, "home"),
+      repositoryUrl: "",
+      cliPath: "",
+    },
+    adapter = {
+      status: async () => ({ pid: 123, daemonVersion: "0.11.4" }),
+      list: async () => [],
+    };
+  return service.createService({
+    settings,
+    adapter,
+    stateRoot: path.join(base, "state"),
+    readSettings: async () => settings,
+    expectedPid: 123,
+    adapterFactory: async () => adapter,
+  });
+}
+
+test("prepare refuses a checkout whose realpath resolves inside the Paseo home, however it is spelled", async () => {
+  // A real profile checkout lives inside the daemon home and is spelled
+  // through a tunnel link placed one level above it, like a linked daemon
+  // home would be: the string containment looks outside the home, while the
+  // realpath that guards every later operation resolves back inside it.
+  const base = await prepareFixture((base, home) =>
+    path.join(home, "nested", "profile"),
+  );
+  await symlink(
+    path.join(base, "home"),
+    path.join(base, "paseo-alias"),
+    "junction",
+  );
+  const s = await prepareService(
+    base,
+    path.join(base, "paseo-alias", "nested", "profile"),
+  );
+  const result = await done(s, await s.start({ kind: "prepare" }));
+  assert.equal(result.status, "failed");
+  assert.match(result.error, /outside the Paseo home/);
+});
+
+test("prepare accepts a checkout outside the Paseo home reached through an in-home alias", async () => {
+  // The alias lives inside the home and points at the real checkout outside
+  // of it. context() decides on realpath(checkout), so prepare must not be
+  // stricter just because the spelling sits inside the home. The alias is
+  // the checkout's parent so the checkout root itself stays a real
+  // directory, which prepareRepository still refuses when it is a link.
+  const base = await prepareFixture((base) =>
+    path.join(base, "repos", "profile"),
+  );
+  await symlink(
+    path.join(base, "repos"),
+    path.join(base, "home", "profiles-alias"),
+    "junction",
+  );
+  const s = await prepareService(
+    base,
+    path.join(base, "home", "profiles-alias", "profile"),
+  );
+  const result = await done(s, await s.start({ kind: "prepare" }));
+  assert.equal(result.status, "succeeded", result.error);
+  assert.equal(result.result.ready, true);
+});
+
 
