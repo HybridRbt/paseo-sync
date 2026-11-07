@@ -1,0 +1,93 @@
+name: Forward new issues to Multica
+
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  forward:
+    if: github.repository == 'HybridRbt/paseo-sync' && github.event.action == 'opened'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Forward issue payload
+        env:
+          MULTICA_WEBHOOK_URL: ${{ secrets.MULTICA_WEBHOOK_URL }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          def fail(message):
+              print(message, file=sys.stderr)
+              raise SystemExit(1)
+
+          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as source:
+              event = json.load(source)
+          repository = event.get('repository', {}).get('full_name')
+          issue = event.get('issue', {})
+          if (os.environ.get('GITHUB_EVENT_NAME') != 'issues'
+                  or event.get('action') != 'opened'
+                  or repository != 'HybridRbt/paseo-sync'
+                  or 'pull_request' in issue):
+              print('Filtered: not a target issue opened event')
+              raise SystemExit(0)
+          if not isinstance(issue.get('number'), int) or not issue.get('html_url'):
+              fail('Missing issue number or URL; nothing sent')
+
+          url = os.environ.get('MULTICA_WEBHOOK_URL', '')
+          parts = urllib.parse.urlsplit(url)
+          if parts.scheme != 'https' or not parts.netloc or parts.username or parts.password:
+              fail('Missing or invalid HTTPS webhook secret; nothing sent')
+
+          run_id = os.environ['GITHUB_RUN_ID']
+          delivery_key = f'gh-actions:{repository}:{run_id}'
+          # Stable payload and key across attempts of the SAME Actions run.
+          # Actions does not provide the original X-GitHub-Delivery here.
+          payload = {
+              'action': 'opened',
+              'repository': {'full_name': repository},
+              'issue': {key: issue.get(key) for key in ('number', 'html_url', 'title', 'body')},
+              'relay': {'kind': 'github-actions', 'run_id': run_id,
+                        'delivery_id': delivery_key},
+          }
+          request = urllib.request.Request(
+              url, data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+              headers={'Content-Type': 'application/json', 'X-GitHub-Event': 'issues',
+                       'Idempotency-Key': delivery_key}, method='POST')
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+          try:
+              with urllib.request.build_opener(NoRedirect).open(request, timeout=30) as response:
+                  result = json.load(response)
+          except urllib.error.HTTPError as error:
+              fail(f'HTTP {error.code}; inspect the existing delivery/run before retrying')
+          except Exception:
+              # Exception text may contain the credential-bearing URL.
+              fail('Transport or response error; inspect existing delivery/run before retrying')
+
+          status = result.get('status') if isinstance(result, dict) else None
+          multica_run = result.get('run_id') if isinstance(result, dict) else None
+          if status not in ('accepted', 'skipped') or not isinstance(multica_run, str):
+              fail('Unexpected response; inspect existing delivery/run before retrying')
+          # Print only a validated non-secret identifier and known status.
+          import uuid
+          try:
+              uuid.UUID(multica_run)
+          except (ValueError, AttributeError):
+              fail('Invalid run identifier; inspect the existing delivery before retrying')
+          print(f'Multica admission={status}; run_id={multica_run}')
+          if status == 'skipped':
+              fail('Skipped: inspect failure_reason in Multica; no completion claimed')
+          print('Accepted for dispatch; implementation and review are still unverified')
+          PY
