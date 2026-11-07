@@ -163,6 +163,17 @@ async function writeHostOnlySettings(ctx, plugin, captured) {
       Buffer.from(b64, "base64"),
     );
 }
+// An operation that died between its removal and the host-only rewrite
+// leaves the captured documents deleted on disk; recover exactly those,
+// never touching documents that exist now (later local edits, or defaults
+// recreated by a reinstall).
+async function recoverHostOnlySettings(ctx, plugin, captured) {
+  for (const [name, b64] of Object.entries(captured ?? {})) {
+    const file = await safeFile(ctx.home, `plugin-settings/${plugin}/${name}`);
+    if ((await bytesOrNull(file)) === null)
+      await atomicWrite(file, Buffer.from(b64, "base64"));
+  }
+}
 async function installedFile(ctx, row, name) {
   if (!path.isAbsolute(row.path))
     throw new Error("Installed plugin path must be absolute");
@@ -1103,9 +1114,18 @@ export async function applyPlan(ctx, approval) {
           await writeJson(file, s.data);
       }
       // Only a reinstall removed the settings directory; its host-only
-      // documents were freshly captured right before that removal.
-      if (change.actions.includes("reinstall"))
+      // documents were freshly captured right before that removal. Once
+      // they are back on disk, drop the captured entry: later restores must
+      // not resurrect documents the user deleted afterwards.
+      if (change.actions.includes("reinstall")) {
         await writeHostOnlySettings(ctx, id, backup.hostOnlySettings?.[id]);
+        if (backup.hostOnlySettings) {
+          delete backup.hostOnlySettings[id];
+          if (!Object.keys(backup.hostOnlySettings).length)
+            delete backup.hostOnlySettings;
+          await writeJson(filename, backup);
+        }
+      }
       if (target.enabled) await ctx.adapter.act("enable", id);
     }
     const verification = await verify(ctx, skippedIds);
@@ -1472,15 +1492,16 @@ export async function restore(ctx, id, approval) {
       // actually removed: the registry rollback (freshly captured right
       // before its removal) and a reinstall from absent, whose predecessor
       // already deleted them, leaving the captured backup bytes as the only
-      // copy. An in-place restore never removed them, and its pre-apply
-      // capture is both stale and invisible to the drift guard: current
-      // local edits must survive untouched.
+      // copy. An in-place restore never removed them; its pre-apply capture
+      // is stale and invisible to the drift guard, so only documents that
+      // an interrupted operation left missing are recovered.
       if (registryRollback || reinstallFromAbsent)
         await writeHostOnlySettings(
           ctx,
           target.id,
           b.hostOnlySettings?.[target.id],
         );
+      else await recoverHostOnlySettings(ctx, target.id, b.hostOnlySettings?.[target.id]);
       if (before.descriptor.enabled) await ctx.adapter.act("enable", target.id);
     }
     const restored = await capture(ctx, b.profile);

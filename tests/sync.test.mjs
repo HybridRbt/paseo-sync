@@ -2291,6 +2291,13 @@ test("an in-place restore after a registry reinstall preserves current host-only
   assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")).values, {
     previewWrap: false,
   });
+  // Deleting the host-only document afterwards is a deliberate local
+  // change: the completed apply dropped its capture, so a later restore
+  // must not resurrect it.
+  await rm(hostOnly, { force: true });
+  const again = await restorePlan(f.ctx, applied.backupId);
+  await restore(f.ctx, applied.backupId, again.approval);
+  await assert.rejects(readFile(hostOnly), (e) => e.code === "ENOENT");
 });
 
 test("a restore recovers host-only settings captured before a failed reinstall", async (t) => {
@@ -2328,6 +2335,61 @@ test("a restore recovers host-only settings captured before a failed reinstall",
     failure = e;
     return Boolean(e.backupId);
   });
+  const preview = await restorePlan(f.ctx, failure.backupId);
+  assert.deepEqual(preview.conflicts, []);
+  await restore(f.ctx, failure.backupId, preview.approval);
+  assert.deepEqual(JSON.parse(await readFile(hostOnly, "utf8")), { v: 1 });
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")).values, {
+    previewWrap: false,
+  });
+  assert.equal(
+    (await f.adapter.list())[0].installation.currentRevision,
+    "2.0.0",
+  );
+});
+
+test("a restore recovers host-only documents left missing by a failed reinstall", async (t) => {
+  const f = await fixture(t, { installed: true });
+  const registry = { url: "https://plugins.paseo.sh", id: "example/demo" };
+  f.manifest.plugins[0].registry = registry;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  await f.adapter.act("remove", "better-paseo");
+  await f.adapter.install({ ...f.plugin, revision: "2.0.0", registry });
+  const hostOnly = path.join(
+    f.home,
+    "plugin-settings/better-paseo/extra.json",
+  );
+  await writeJson(hostOnly, { v: 1 });
+  await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
+  const ctx = { ...f.ctx, preferProfile: true, reinstallRegistry: true };
+  const plan = await buildPlan(ctx);
+  // Removal and installation succeed, but the apply dies on the
+  // post-install disable — after the settings directory was deleted and
+  // before the host-only rewrite, whose captured bytes now exist only in
+  // the failed backup.
+  const act = f.adapter.act;
+  let disables = 0;
+  f.adapter.act = async (action, id) => {
+    if (action === "disable" && ++disables === 2)
+      throw new Error("post-install disable failed");
+    return act(action, id);
+  };
+  let failure;
+  await assert.rejects(applyPlan(ctx, plan.approval), (e) => {
+    failure = e;
+    return Boolean(e.backupId);
+  });
+  f.adapter.act = act;
+  // The production reinstall dropped registry provenance, so the restore
+  // takes the in-place update path; the missing captured documents must
+  // still be recovered.
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    delete rows[0].installation.identity.registry;
+    return rows;
+  };
   const preview = await restorePlan(f.ctx, failure.backupId);
   assert.deepEqual(preview.conflicts, []);
   await restore(f.ctx, failure.backupId, preview.approval);
