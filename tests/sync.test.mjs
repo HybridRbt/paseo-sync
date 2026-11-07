@@ -2480,6 +2480,69 @@ test("a restore recovers captured host-only contents over recreated defaults but
   }
 });
 
+test("a restore retry recovers captured contents over defaults from a failed recovery installation", async (t) => {
+  const f = await fixture(t, { installed: true });
+  const registry = { url: "https://plugins.paseo.sh", id: "example/demo" };
+  f.manifest.plugins[0].registry = registry;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  await f.adapter.act("remove", "better-paseo");
+  await f.adapter.install({ ...f.plugin, revision: "2.0.0", registry });
+  const hostOnly = path.join(
+    f.home,
+    "plugin-settings/better-paseo/extra.json",
+  );
+  await writeJson(hostOnly, { exclusions: ["kept"] });
+  await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
+  const ctx = { ...f.ctx, preferProfile: true, reinstallRegistry: true };
+  const plan = await buildPlan(ctx);
+  // The apply's removal succeeds but its installation fails.
+  const act = f.adapter.act,
+    install = f.adapter.install;
+  f.adapter.install = async (p) => {
+    if (p.revision === "1.0.0") throw new Error("network unavailable");
+    return install(p);
+  };
+  let failure;
+  await assert.rejects(applyPlan(ctx, plan.approval), (e) => {
+    failure = e;
+    return Boolean(e.backupId);
+  });
+  // Restore #1: the recovery installation succeeds and recreates the
+  // host-only document with defaults, but the post-install disable fails.
+  let failNextDisable = false;
+  f.adapter.install = async (p) => {
+    const result = await install(p);
+    if (p.revision === "2.0.0") {
+      await writeJson(hostOnly, {});
+      failNextDisable = true;
+    }
+    return result;
+  };
+  f.adapter.act = async (action, id) => {
+    if (action === "disable" && failNextDisable) {
+      failNextDisable = false;
+      throw new Error("post-install disable failed");
+    }
+    return act(action, id);
+  };
+  const first = await restorePlan(f.ctx, failure.backupId);
+  await assert.rejects(restore(f.ctx, failure.backupId, first.approval));
+  f.adapter.install = install;
+  f.adapter.act = act;
+  // Restore #2 (retry, in-place): the recorded installation defaults let
+  // the captured contents come back over the untouched defaults.
+  const retry = await restorePlan(f.ctx, failure.backupId);
+  assert.deepEqual(retry.conflicts, []);
+  await restore(f.ctx, failure.backupId, retry.approval);
+  assert.deepEqual(JSON.parse(await readFile(hostOnly, "utf8")), {
+    exclusions: ["kept"],
+  });
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")).values, {
+    previewWrap: false,
+  });
+});
+
 test("edits landing while a registry reinstall stops the plugin abort before removal", async (t) => {
   const f = await fixture(t, { installed: true }),
     { execFileSync } = await import("node:child_process");

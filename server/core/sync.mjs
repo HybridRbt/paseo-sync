@@ -1494,6 +1494,38 @@ export async function restore(ctx, id, approval) {
           if (row) await ctx.adapter.update(before.descriptor);
           else await ctx.adapter.install(before.descriptor);
         }
+        // A recovery installation may recreate captured host-only
+        // documents with fresh defaults. Record their post-install bytes —
+        // persisting before the fallible steps below — so a retry after a
+        // later failure can tell those defaults apart from local edits and
+        // still recover the captured contents (mirroring the apply-side
+        // marker).
+        if (registryRollback || reinstallFromAbsent) {
+          const capturedDocs = b.hostOnlySettings?.[target.id];
+          if (capturedDocs) {
+            const recreated = {};
+            for (const name of Object.keys(capturedDocs)) {
+              const raw = await bytesOrNull(
+                await safeFile(
+                  ctx.home,
+                  `plugin-settings/${target.id}/${name}`,
+                ),
+              );
+              if (
+                raw !== null &&
+                raw.toString("base64") !== capturedDocs[name]
+              )
+                recreated[name] = raw.toString("base64");
+            }
+            if (Object.keys(recreated).length) {
+              b.hostOnlyRecreated = {
+                ...b.hostOnlyRecreated,
+                [target.id]: recreated,
+              };
+              await writeJson(await backupFile(ctx, id), b);
+            }
+          }
+        }
         row = (await ctx.adapter.list()).find((x) => x.id === target.id);
         if (row?.enabled) await ctx.adapter.act("disable", target.id);
         // A reinstall (registry rollback, or recovery from a failed one that
