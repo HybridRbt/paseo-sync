@@ -1,7 +1,7 @@
 import { sourceState } from "./source-state.mjs";
 import { acquireOperation } from "./lock.mjs";
 import { randomUUID } from "node:crypto";
-import { readFile, mkdir, rm, lstat, writeFile, rename } from "node:fs/promises";
+import { readFile, mkdir, rm, lstat, writeFile, rename, realpath } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -136,10 +136,26 @@ async function installedFile(ctx, row, name) {
     );
   return safeFile(ctx.home, `${segments.join("/")}/${name}`);
 }
-export function isManagedLocalPath(home, pluginPath) {
+export async function isManagedLocalPath(home, pluginPath) {
   if (!pluginPath || !path.isAbsolute(pluginPath)) return false;
-  const rel = path.relative(path.join(home, "local-plugins"), pluginPath);
-  return !rel.startsWith("..") && !path.isAbsolute(rel);
+  // Managing is a real-location decision, like the other prefix-relative
+  // comparisons: row.path from the daemon and the home spelling may both
+  // carry symlink components (a linked home or macOS /var checkouts), so
+  // both sides resolve to their real locations before comparing. A link
+  // inside local-plugins escaping the boundary groups as unmanaged, a
+  // missing local-plugins root or missing plugin path is not managed.
+  const local = path.join(home, "local-plugins");
+  let actualLocal, actualPlugin;
+  try {
+    [actualLocal, actualPlugin] = await Promise.all([
+      realpath(local),
+      realpath(pluginPath),
+    ]);
+  } catch {
+    return false;
+  }
+  const rel = path.relative(actualLocal, actualPlugin);
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
 export async function hasBundleMarker(pluginPath) {
@@ -214,12 +230,12 @@ export async function installOrUpdateBundlePlugin(
   existingPath = null,
 ) {
   const destDir =
-    isUpdate && existingPath && isManagedLocalPath(ctx.home, existingPath)
+    isUpdate && existingPath && (await isManagedLocalPath(ctx.home, existingPath))
       ? existingPath
       : path.join(ctx.home, "local-plugins", target.id);
 
   if (isUpdate) {
-    if (!existingPath || !isManagedLocalPath(ctx.home, existingPath)) {
+    if (!existingPath || !(await isManagedLocalPath(ctx.home, existingPath))) {
       throw new Error(
         `Cannot update external plugin checkout with bundle: ${target.id} (${existingPath})`,
       );
@@ -236,7 +252,7 @@ export async function installOrUpdateBundlePlugin(
   }
 
   // Preserve previous bundle archive before replacing it so restore can roll back (Review #1)
-  if (isUpdate && existingPath && isManagedLocalPath(ctx.home, existingPath)) {
+  if (isUpdate && existingPath && (await isManagedLocalPath(ctx.home, existingPath))) {
     try {
       const metaFile = path.join(existingPath, BUNDLE_MARKER);
       const rawMeta = await bytesOrNull(metaFile);
@@ -591,7 +607,7 @@ async function planData(ctx) {
     if (
       currentPlugin?.path &&
       target.source.startsWith("bundle:") &&
-      (!isManagedLocalPath(ctx.home, currentPlugin.path) ||
+      (!(await isManagedLocalPath(ctx.home, currentPlugin.path)) ||
         !(await hasBundleMarker(currentPlugin.path)))
     ) {
       if (now?.revision !== target.revision) {
