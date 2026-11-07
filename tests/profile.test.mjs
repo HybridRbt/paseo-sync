@@ -8,6 +8,7 @@ import {
   validateProfile,
   snapshotPlugin,
   validateSettings,
+  normalizeSettings,
 } from "../server/core/profile.mjs";
 import { safeFile } from "../server/core/files.mjs";
 
@@ -90,6 +91,82 @@ test("setting allowlist rejects credential-shaped and newly introduced fields", 
   }
   assert.throws(() =>
     validateSettings("linear", "credentials", { version: 1, values: {} }),
+  );
+});
+
+test("accepts the accent and inline code colors better-paseo publishes today", () => {
+  for (const accent of ["zinc", "midnight", "claude", "ghostty", "pureBlack"])
+    assert.doesNotThrow(() =>
+      validateSettings("better-paseo", "presentation", {
+        version: 1,
+        values: { accent },
+      }),
+    );
+  for (const inlineCodeColor of [
+    "jade",
+    "amber",
+    "rose",
+    "zinc",
+    "midnight",
+    "claude",
+    "ghostty",
+    "pureBlack",
+  ])
+    assert.doesNotThrow(() =>
+      validateSettings("better-paseo", "presentation", {
+        version: 1,
+        values: { inlineCodeColor },
+      }),
+    );
+});
+
+test("normalizes the legacy rowLabels and hoverDelay spellings the daemon keeps on disk", () => {
+  assert.deepEqual(
+    normalizeSettings({
+      version: 1,
+      values: { rowLabels: true, hoverDelay: "500ms", previewWrap: false },
+    }),
+    {
+      version: 1,
+      values: {
+        previewWrap: false,
+        rowLabelStyle: "both",
+        hoverDelaySeconds: 0.5,
+      },
+    },
+  );
+  // A modern key wins and its legacy spelling drops, exactly like the plugin's
+  // own read-time migration.
+  assert.deepEqual(
+    normalizeSettings({
+      version: 1,
+      values: {
+        rowLabels: true,
+        rowLabelStyle: "icon",
+        hoverDelay: "1s",
+        hoverDelaySeconds: 2,
+      },
+    }).values,
+    { rowLabelStyle: "icon", hoverDelaySeconds: 2 },
+  );
+  // Unmapped legacy delay spellings drop instead of being guessed.
+  assert.deepEqual(
+    normalizeSettings({ version: 1, values: { hoverDelay: "300ms" } }).values,
+    {},
+  );
+  const once = normalizeSettings({
+    version: 1,
+    values: { rowLabels: true, hoverDelay: "2s" },
+  });
+  assert.deepEqual(normalizeSettings(once), once);
+  // Fields that are still unknown after normalization reject by name.
+  assert.throws(
+    () =>
+      validateSettings("better-paseo", "presentation", {
+        version: 1,
+        values: { token: "secret", rowClick: true },
+      }),
+    /Unsupported presentation fields: token, rowClick/,
   );
 });
 
