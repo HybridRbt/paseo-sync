@@ -167,10 +167,19 @@ async function writeHostOnlySettings(ctx, plugin, captured) {
 // leaves the captured documents deleted on disk; recover exactly those,
 // never touching documents that exist now (later local edits, or defaults
 // recreated by a reinstall).
-async function recoverHostOnlySettings(ctx, plugin, captured) {
+async function recoverHostOnlySettings(ctx, plugin, captured, recreated = {}) {
   for (const [name, b64] of Object.entries(captured ?? {})) {
     const file = await safeFile(ctx.home, `plugin-settings/${plugin}/${name}`);
-    if ((await bytesOrNull(file)) === null)
+    const raw = await bytesOrNull(file);
+    // Missing documents are recovered outright. Documents the incomplete
+    // installation recreated with defaults are recovered while their bytes
+    // still match what that installation wrote; anything else is a later
+    // local edit and stays untouched.
+    const installDefaults =
+      Object.hasOwn(recreated, name) &&
+      raw !== null &&
+      raw.toString("base64") === recreated[name];
+    if (raw === null || installDefaults)
       await atomicWrite(file, Buffer.from(b64, "base64"));
   }
 }
@@ -1069,6 +1078,32 @@ export async function applyPlan(ctx, approval) {
         await writeJson(filename, backup);
         await ctx.adapter.act("remove", id);
         await ctx.adapter.install(target);
+        // The installation may recreate host-only documents with fresh
+        // defaults. Record their post-install bytes so a restore of this
+        // operation — if it fails before the rewrite below — can tell the
+        // daemon's defaults (bytes still matching) apart from local edits
+        // made after the failure, and recover the captured contents.
+        const capturedHostOnly = backup.hostOnlySettings?.[id];
+        if (capturedHostOnly) {
+          const recreated = {};
+          for (const name of Object.keys(capturedHostOnly)) {
+            const raw = await bytesOrNull(
+              await safeFile(ctx.home, `plugin-settings/${id}/${name}`),
+            );
+            if (
+              raw !== null &&
+              raw.toString("base64") !== capturedHostOnly[name]
+            )
+              recreated[name] = raw.toString("base64");
+          }
+          if (Object.keys(recreated).length) {
+            backup.hostOnlyRecreated = {
+              ...backup.hostOnlyRecreated,
+              [id]: recreated,
+            };
+            await writeJson(filename, backup);
+          }
+        }
         const row = (await ctx.adapter.list()).find((x) => x.id === id);
         if (!row) throw new Error(`Install returned no plugin: ${id}`);
         if (row.enabled) await ctx.adapter.act("disable", id);
@@ -1123,6 +1158,11 @@ export async function applyPlan(ctx, approval) {
           delete backup.hostOnlySettings[id];
           if (!Object.keys(backup.hostOnlySettings).length)
             delete backup.hostOnlySettings;
+          if (backup.hostOnlyRecreated) {
+            delete backup.hostOnlyRecreated[id];
+            if (!Object.keys(backup.hostOnlyRecreated).length)
+              delete backup.hostOnlyRecreated;
+          }
           await writeJson(filename, backup);
         }
       }
@@ -1501,7 +1541,13 @@ export async function restore(ctx, id, approval) {
           target.id,
           b.hostOnlySettings?.[target.id],
         );
-      else await recoverHostOnlySettings(ctx, target.id, b.hostOnlySettings?.[target.id]);
+      else
+        await recoverHostOnlySettings(
+          ctx,
+          target.id,
+          b.hostOnlySettings?.[target.id],
+          b.hostOnlyRecreated?.[target.id],
+        );
       if (before.descriptor.enabled) await ctx.adapter.act("enable", target.id);
     }
     const restored = await capture(ctx, b.profile);

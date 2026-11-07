@@ -2403,6 +2403,83 @@ test("a restore recovers host-only documents left missing by a failed reinstall"
   );
 });
 
+test("a restore recovers captured host-only contents over recreated defaults but keeps later edits", async (t) => {
+  const registry = { url: "https://plugins.paseo.sh", id: "example/demo" };
+  const setup = async () => {
+    const f = await fixture(t, { installed: true });
+    f.manifest.plugins[0].registry = registry;
+    await writeJson(path.join(f.root, "profile.json"), f.manifest);
+    await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+    await f.adapter.act("remove", "better-paseo");
+    await f.adapter.install({ ...f.plugin, revision: "2.0.0", registry });
+    return f;
+  };
+  const hostOnlyOf = (f) =>
+    path.join(f.home, "plugin-settings/better-paseo/extra.json");
+  // A reinstall whose installation recreates the host-only document with
+  // fresh defaults, then dies on the post-install disable before its
+  // rewrite.
+  const failAfterRecreatingDefaults = async (f, hostOnly) => {
+    await writeJson(hostOnly, { exclusions: ["kept"] });
+    await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
+    const ctx = { ...f.ctx, preferProfile: true, reinstallRegistry: true };
+    const plan = await buildPlan(ctx);
+    const act = f.adapter.act,
+      install = f.adapter.install;
+    let disables = 0;
+    f.adapter.install = async (p) => {
+      const result = await install(p);
+      if (p.revision === "1.0.0") await writeJson(hostOnly, {});
+      return result;
+    };
+    f.adapter.act = async (action, id) => {
+      if (action === "disable" && ++disables === 2)
+        throw new Error("post-install disable failed");
+      return act(action, id);
+    };
+    let failure;
+    await assert.rejects(applyPlan(ctx, plan.approval), (e) => {
+      failure = e;
+      return Boolean(e.backupId);
+    });
+    f.adapter.act = act;
+    f.adapter.install = install;
+    const list = f.adapter.list;
+    f.adapter.list = async () => {
+      const rows = await list();
+      delete rows[0].installation.identity.registry;
+      return rows;
+    };
+    return failure;
+  };
+
+  // Case 1: the recreated defaults still sit untouched; the restore
+  // recovers the captured contents over them.
+  {
+    const f = await setup(),
+      hostOnly = hostOnlyOf(f),
+      failure = await failAfterRecreatingDefaults(f, hostOnly);
+    const preview = await restorePlan(f.ctx, failure.backupId);
+    await restore(f.ctx, failure.backupId, preview.approval);
+    assert.deepEqual(JSON.parse(await readFile(hostOnly, "utf8")), {
+      exclusions: ["kept"],
+    });
+  }
+  // Case 2: the user edited the recreated defaults after the failure; the
+  // restore keeps that edit instead of the pre-apply capture.
+  {
+    const f = await setup(),
+      hostOnly = hostOnlyOf(f),
+      failure = await failAfterRecreatingDefaults(f, hostOnly);
+    await writeJson(hostOnly, { editedAfterFailure: true });
+    const preview = await restorePlan(f.ctx, failure.backupId);
+    await restore(f.ctx, failure.backupId, preview.approval);
+    assert.deepEqual(JSON.parse(await readFile(hostOnly, "utf8")), {
+      editedAfterFailure: true,
+    });
+  }
+});
+
 test("edits landing while a registry reinstall stops the plugin abort before removal", async (t) => {
   const f = await fixture(t, { installed: true }),
     { execFileSync } = await import("node:child_process");
