@@ -1358,6 +1358,9 @@ export async function restore(ctx, id, approval) {
       await writeJson(await backupFile(ctx, id), b);
       const before = b.before.plugins[target.id];
       let row = (await ctx.adapter.list()).find((x) => x.id === target.id);
+      // An absent installation means whatever removed it also deleted its
+      // settings directory; captured host-only documents are the only copy.
+      const reinstallFromAbsent = !row;
       if (row?.enabled) await ctx.adapter.act("disable", target.id);
       if (
         row &&
@@ -1459,12 +1462,14 @@ export async function restore(ctx, id, approval) {
         if (raw === null) await rm(file, { force: true });
         else await atomicWrite(file, Buffer.from(raw, "base64"));
       }
-      // Host-only documents are rewritten only when the rollback actually
-      // removed the installation (freshly captured right before). An
-      // in-place restore never removed them, and the pre-apply capture is
-      // both stale and invisible to the drift guard: current local edits
-      // must survive untouched.
-      if (registryRollback)
+      // Host-only documents are rewritten only where the installation was
+      // actually removed: the registry rollback (freshly captured right
+      // before its removal) and a reinstall from absent, whose predecessor
+      // already deleted them, leaving the captured backup bytes as the only
+      // copy. An in-place restore never removed them, and its pre-apply
+      // capture is both stale and invisible to the drift guard: current
+      // local edits must survive untouched.
+      if (registryRollback || reinstallFromAbsent)
         await writeHostOnlySettings(
           ctx,
           target.id,

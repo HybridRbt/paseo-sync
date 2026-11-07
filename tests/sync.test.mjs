@@ -2293,6 +2293,48 @@ test("an in-place restore after a registry reinstall preserves current host-only
   });
 });
 
+test("a restore recovers host-only settings captured before a failed reinstall", async (t) => {
+  const f = await fixture(t, { installed: true });
+  const registry = { url: "https://plugins.paseo.sh", id: "example/demo" };
+  f.manifest.plugins[0].registry = registry;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  await f.adapter.act("remove", "better-paseo");
+  await f.adapter.install({ ...f.plugin, revision: "2.0.0", registry });
+  const hostOnly = path.join(
+    f.home,
+    "plugin-settings/better-paseo/extra.json",
+  );
+  await writeJson(hostOnly, { v: 1 });
+  await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
+  const ctx = { ...f.ctx, preferProfile: true, reinstallRegistry: true };
+  const plan = await buildPlan(ctx);
+  // The removal succeeds but the installation fails (e.g. no network): the
+  // captured host-only documents survive only inside the failed backup.
+  const install = f.adapter.install;
+  f.adapter.install = async (p) => {
+    if (p.revision === "1.0.0") throw new Error("network unavailable");
+    return install(p);
+  };
+  let failure;
+  await assert.rejects(applyPlan(ctx, plan.approval), (e) => {
+    failure = e;
+    return Boolean(e.backupId);
+  });
+  f.adapter.install = install;
+  const preview = await restorePlan(f.ctx, failure.backupId);
+  assert.deepEqual(preview.conflicts, []);
+  await restore(f.ctx, failure.backupId, preview.approval);
+  assert.deepEqual(JSON.parse(await readFile(hostOnly, "utf8")), { v: 1 });
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")).values, {
+    previewWrap: false,
+  });
+  assert.equal(
+    (await f.adapter.list())[0].installation.currentRevision,
+    "2.0.0",
+  );
+});
+
 test("edits landing while a registry reinstall stops the plugin abort before removal", async (t) => {
   const f = await fixture(t, { installed: true }),
     { execFileSync } = await import("node:child_process");
