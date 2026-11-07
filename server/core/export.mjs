@@ -26,6 +26,7 @@ import {
   loadProfile,
   validatePatch,
   patchText,
+  normalizeSettings,
 } from "./profile.mjs";
 
 import { git } from "./git.mjs";
@@ -274,12 +275,15 @@ export async function exportProfile(ctx) {
     const file = "settings/better-paseo/presentation.json";
     const data = await jsonOrNull(await safeFile(ctx.home, "plugin-" + file));
     if (data !== null) {
-      validateSettings("better-paseo", "presentation", data);
+      // The live document is normalized before export so the repository keeps
+      // only the current spelling; legacy spellings never enter it.
+      const doc = normalizeSettings(data);
+      validateSettings("better-paseo", "presentation", doc);
       settings.push({
         plugin: "better-paseo",
         document: "presentation",
         file,
-        data,
+        data: doc,
       });
     }
   }

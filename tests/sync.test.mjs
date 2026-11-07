@@ -199,6 +199,72 @@ test("rejects disabled global switch and refuses to turn it on", async (t) => {
   assert.deepEqual(f.calls, []);
 });
 
+test("a live presentation document with legacy spellings previews, applies, and keeps local-change protection", async (t) => {
+  const f = await fixture(t, { installed: true });
+  // The daemon keeps better-paseo's legacy spellings on disk until the plugin
+  // rewrites them; reading such a host document used to fail the preview with
+  // "Invalid fields; expected accent, ...".
+  await writeJson(f.setting, {
+    version: 1,
+    values: { previewWrap: true, rowLabels: true, hoverDelay: "500ms" },
+  });
+  await writeJson(path.join(f.root, f.manifest.settings[0].file), {
+    version: 1,
+    values: { previewWrap: true, rowLabelStyle: "both", hoverDelaySeconds: 0.5 },
+  });
+  let p = await buildPlan(f.ctx);
+  // Semantically equal documents produce no phantom settings change.
+  assert.equal(p.changes.length, 0);
+  await applyPlan(f.ctx, p.approval);
+  // A repository change over an untouched legacy local spelling schedules the
+  // canonical write without a phantom conflict.
+  await writeJson(path.join(f.root, f.manifest.settings[0].file), {
+    version: 1,
+    values: { previewWrap: false, rowLabelStyle: "both", hoverDelaySeconds: 0.5 },
+  });
+  p = await buildPlan(f.ctx);
+  assert.equal(p.conflicts.length, 0);
+  assert.deepEqual(
+    p.changes.flatMap((c) => c.actions),
+    ["settings:presentation"],
+  );
+  await applyPlan(f.ctx, p.approval);
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")), {
+    version: 1,
+    values: { previewWrap: false, rowLabelStyle: "both", hoverDelaySeconds: 0.5 },
+  });
+  assert.equal((await verify(f.ctx)).configurationMatches, true);
+  // Reappearing in the legacy spelling of the synchronized state is not a change.
+  await writeJson(f.setting, {
+    version: 1,
+    values: { previewWrap: false, rowLabels: true, hoverDelay: "500ms" },
+  });
+  p = await buildPlan(f.ctx);
+  assert.equal(p.changes.length, 0);
+  assert.equal(p.conflicts.length, 0);
+  // A local edit made through a legacy spelling still counts as protected.
+  await writeJson(f.setting, {
+    version: 1,
+    values: { previewWrap: true, rowLabels: true, hoverDelay: "2s" },
+  });
+  p = await buildPlan(f.ctx);
+  assert.ok(p.conflicts.some((x) => x.includes("Local changes conflict")));
+});
+
+test("applies the newer accent and inline code color choices better-paseo publishes", async (t) => {
+  const f = await fixture(t);
+  await writeJson(path.join(f.root, f.manifest.settings[0].file), {
+    version: 1,
+    values: { accent: "zinc", inlineCodeColor: "ghostty" },
+  });
+  const p = await buildPlan(f.ctx);
+  await applyPlan(f.ctx, p.approval);
+  const stored = JSON.parse(await readFile(f.setting, "utf8"));
+  assert.equal(stored.values.accent, "zinc");
+  assert.equal(stored.values.inlineCodeColor, "ghostty");
+  assert.equal((await verify(f.ctx)).configurationMatches, true);
+});
+
 test("detects local edits against baseline and supports an explicit profile preference", async (t) => {
   const f = await fixture(t, { installed: true });
   let p = await buildPlan(f.ctx);
