@@ -199,11 +199,23 @@ const LEGACY_HOVER_DELAYS = {
   "1.5s": 1.5,
   "2s": 2,
 };
+/**
+ * Migrates legacy boolean rowLabels setting to rowLabelStyle if not already present.
+ *
+ * @param {Record<string, unknown>} values
+ * @returns {Record<string, unknown>}
+ */
 function migrateRowLabels(values) {
   const { rowLabels, ...rest } = values;
   if ("rowLabelStyle" in rest) return rest;
   return rowLabels === true ? { ...rest, rowLabelStyle: "both" } : rest;
 }
+/**
+ * Migrates legacy string hoverDelay setting to numeric hoverDelaySeconds if not already present.
+ *
+ * @param {Record<string, unknown>} values
+ * @returns {Record<string, unknown>}
+ */
 function migrateHoverDelay(values) {
   const { hoverDelay, ...rest } = values;
   if ("hoverDelaySeconds" in rest) return rest;
@@ -213,10 +225,24 @@ function migrateHoverDelay(values) {
     ? rest
     : { ...rest, hoverDelaySeconds: seconds };
 }
+/**
+ * Normalizes legacy better-paseo presentation settings values to canonical fields.
+ *
+ * @param {unknown} d
+ * @returns {unknown}
+ */
 export function normalizeSettings(d) {
   if (!object(d) || !object(d.values)) return d;
   return { ...d, values: migrateHoverDelay(migrateRowLabels(d.values)) };
 }
+/**
+ * Validates better-paseo presentation settings document structure, versions, allowed keys, and values.
+ *
+ * @param {string} plugin
+ * @param {string} document
+ * @param {any} d
+ * @returns {any}
+ */
 export function validateSettings(plugin, document, d) {
   check(
     plugin === "better-paseo" && document === "presentation",

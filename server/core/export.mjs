@@ -66,6 +66,12 @@ export async function assertRepositoryReady(root) {
       "Repository is behind or diverged from its upstream; reconcile Git before exporting.",
     );
 }
+/**
+ * Exports the live installation state, allowlisted settings, and patches into repository profile.
+ *
+ * @param {object} ctx
+ * @returns {Promise<{ manifest: object, settings: object[], patches: object[] }>}
+ */
 export async function exportProfile(ctx) {
   await assertRepositoryReady(ctx.root);
   if (ctx.state) await privateRoot(ctx.state);

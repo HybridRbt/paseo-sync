@@ -251,6 +251,36 @@ test("a live presentation document with legacy spellings previews, applies, and 
   assert.ok(p.conflicts.some((x) => x.includes("Local changes conflict")));
 });
 
+test("restore succeeds when stored backup settings snapshot carries legacy spellings or formatting", async (t) => {
+  const f = await fixture(t, { installed: true });
+  // Host starts with previewWrap: false, repo target has previewWrap: true.
+  await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
+  const p = await buildPlan(f.ctx);
+  assert.equal(p.changes.length, 1);
+  const result = await applyPlan(f.ctx, p.approval);
+  assert.ok(result.backupId);
+
+  // Simulate an older backup whose before.settings captured legacy spellings
+  // or formatted indentation (as written before live settings normalization).
+  const bFile = path.join(f.state, "backups", `${result.backupId}.json`);
+  const backup = JSON.parse(await readFile(bFile, "utf8"));
+  const legacyBefore = {
+    version: 1,
+    values: { previewWrap: false, rowLabels: true, hoverDelay: "500ms" },
+  };
+  backup.before.settings["settings/better-paseo/presentation.json"] =
+    Buffer.from(JSON.stringify(legacyBefore, null, 2)).toString("base64");
+  await writeJson(bFile, backup);
+
+  const preview = await restorePlan(f.ctx, result.backupId);
+  const restored = await restore(f.ctx, result.backupId, preview.approval);
+  assert.equal(restored.restored, true);
+  const onDisk = JSON.parse(await readFile(f.setting, "utf8"));
+  assert.equal(onDisk.values.previewWrap, false);
+  assert.equal(onDisk.values.rowLabels, true);
+  assert.equal(onDisk.values.hoverDelay, "500ms");
+});
+
 test("applies the newer accent and inline code color choices better-paseo publishes", async (t) => {
   const f = await fixture(t);
   await writeJson(path.join(f.root, f.manifest.settings[0].file), {
