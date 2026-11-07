@@ -27,6 +27,7 @@ export const startRpc = defineRpc({
       .optional(),
     preferProfile: z.boolean().optional(),
     preferLocal: z.boolean().optional(),
+    reinstallRegistry: z.boolean().optional(),
   }),
   output: z.object({ id: z.string(), kind: z.string(), status: z.string() }),
 });
