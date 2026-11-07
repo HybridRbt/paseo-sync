@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, lstat, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, lstat, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { digest, writeJson } from "../server/core/files.mjs";
@@ -2325,6 +2325,143 @@ test("bundle update refuses a plugin root that is itself a symlink", async () =>
       await readFile(path.join(plugin, "index.js"), "utf8"),
       "version 1;",
     );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("bundle installs run the manifest build commands on the staged copy before installation", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "paseo-sync-"));
+  try {
+    const root = path.join(base, "repo"),
+      home = path.join(base, "home"),
+      state = path.join(base, "state");
+    for (const dir of [root, home, state]) await mkdir(dir, { recursive: true });
+
+    // The packed plugin declares build commands (the daemon runs these for
+    // git/npm installs but not for the directory installs a restore produces).
+    const sourceDir = path.join(base, "src");
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      path.join(sourceDir, "paseo-plugin.json"),
+      JSON.stringify({
+        id: "flowly",
+        build: [
+          [
+            process.execPath,
+            "-e",
+            `require('node:fs').writeFileSync('prepared-by-build.txt','ok')`,
+          ],
+        ],
+      }),
+      "utf8",
+    );
+    await writeFile(path.join(sourceDir, "index.server.ts"), "export {};");
+    const packed = await packPluginDirectory(sourceDir);
+    await mkdir(path.join(root, "bundles"), { recursive: true });
+    await writeFile(path.join(root, "bundles/flowly.tar.gz"), packed.buffer);
+
+    const installs = [];
+    const ctx = {
+      home,
+      root,
+      state,
+      adapter: {
+        async install(p) {
+          installs.push(p);
+          return { id: p.id };
+        },
+        async reload() {},
+      },
+    };
+    const { installOrUpdateBundlePlugin } = await import("../server/core/sync.mjs");
+    const destDir = await installOrUpdateBundlePlugin(ctx, {
+      id: "flowly",
+      source: "bundle:bundles/flowly.tar.gz",
+      revision: packed.sha256,
+    });
+    assert.equal(destDir, path.join(home, "local-plugins", "flowly"));
+    assert.equal(installs.length, 1);
+    assert.equal(installs[0].source, destDir);
+    // The build command ran inside the staged copy that became the install.
+    assert.equal(
+      await readFile(path.join(destDir, "prepared-by-build.txt"), "utf8"),
+      "ok",
+    );
+    const leftovers = (await readdir(path.join(home, "local-plugins"))).filter((name) =>
+      name.includes(".stage-"),
+    );
+    assert.deepEqual(leftovers, []);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a failing bundle build command aborts the swap and keeps the previous installation", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "paseo-sync-"));
+  try {
+    const root = path.join(base, "repo"),
+      home = path.join(base, "home"),
+      state = path.join(base, "state");
+    for (const dir of [root, home, state]) await mkdir(dir, { recursive: true });
+
+    const pluginDir = path.join(home, "local-plugins", "flowly");
+    await mkdir(pluginDir, { recursive: true });
+    await writeFile(path.join(pluginDir, "index.js"), "version 1;");
+    await writeFile(
+      path.join(pluginDir, BUNDLE_MARKER),
+      JSON.stringify({
+        source: "bundle:bundles/flowly.tar.gz",
+        revision: "r1",
+      }),
+      "utf8",
+    );
+
+    const sourceDir = path.join(base, "src");
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      path.join(sourceDir, "paseo-plugin.json"),
+      JSON.stringify({
+        id: "flowly",
+        build: [[process.execPath, "-e", "process.exit(7)"]],
+      }),
+      "utf8",
+    );
+    await writeFile(path.join(sourceDir, "index.js"), "version 2;");
+    const packed = await packPluginDirectory(sourceDir);
+    await mkdir(path.join(root, "bundles"), { recursive: true });
+    await writeFile(path.join(root, "bundles/flowly.tar.gz"), packed.buffer);
+
+    let reloaded = false;
+    const ctx = {
+      home,
+      root,
+      state,
+      adapter: {
+        async install() {
+          throw new Error("install must not run when preparation fails");
+        },
+        async reload() {
+          reloaded = true;
+        },
+      },
+    };
+    const { installOrUpdateBundlePlugin } = await import("../server/core/sync.mjs");
+    await assert.rejects(
+      installOrUpdateBundlePlugin(
+        ctx,
+        { id: "flowly", source: "bundle:bundles/flowly.tar.gz", revision: packed.sha256 },
+        true,
+        pluginDir,
+      ),
+      (err) => /Plugin build command failed \(exit 7\)/.test(err.message),
+    );
+    assert.equal(reloaded, false);
+    assert.equal(await readFile(path.join(pluginDir, "index.js"), "utf8"), "version 1;");
+    const leftovers = (await readdir(path.join(home, "local-plugins"))).filter((name) =>
+      name.includes(".stage-") || name.includes(".bak-"),
+    );
+    assert.deepEqual(leftovers, []);
   } finally {
     await rm(base, { recursive: true, force: true });
   }

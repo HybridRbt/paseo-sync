@@ -30,6 +30,7 @@ import {
   BUNDLE_MARKER,
   resolveBundleArchive,
 } from "./bundle.mjs";
+import { prepareBundleDirectory } from "./prepare.mjs";
 
 function skipMissingDisabled(ctx, current, target) {
   return (
@@ -327,6 +328,13 @@ export async function installOrUpdateBundlePlugin(
       ),
       "utf8",
     );
+    // Directory installs skip the daemon's own preparation, and bundles ship
+    // without node_modules, so type-only imports such as "@getpaseo/client"
+    // would find no declarations and fail compilation (the Windows restore
+    // error). Run the plugin's declared build commands on the staged copy —
+    // the same commands a git/npm install executes — before it replaces the
+    // destination.
+    await prepareBundleDirectory(stageDir);
   } catch (err) {
     await rm(stageDir, { recursive: true, force: true });
     throw err;
