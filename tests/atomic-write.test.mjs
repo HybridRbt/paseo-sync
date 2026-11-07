@@ -73,3 +73,44 @@ test("best-effort probes opt out of the Windows retry waits", async (t) => {
   }
   assert.equal(mock.mock.callCount(), 1);
 });
+test("bytesOrNull gives up after five Windows retries and surfaces the error", async (t) => {
+  const base = await fs.mkdtemp(path.join(tmpdir(), "paseo-limit-")),
+    file = path.join(base, "owner.json");
+  await fs.writeFile(file, "{}");
+  const readFile = fs.readFile,
+    platform = process.platform;
+  let count = 0;
+  const mock = t.mock.method(fs, "readFile", async (...args) => {
+    if (count++ < 6) {
+      const e = new Error("still occupied");
+      e.code = "EPERM";
+      throw e;
+    }
+    return readFile(...args);
+  });
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    await assert.rejects(bytesOrNull(file), /still occupied/);
+  } finally {
+    Object.defineProperty(process, "platform", { value: platform });
+  }
+  assert.equal(mock.mock.callCount(), 6);
+});
+test("read errors propagate untouched outside Windows", async (t) => {
+  const base = await fs.mkdtemp(path.join(tmpdir(), "paseo-unix-")),
+    file = path.join(base, "owner.json");
+  await fs.writeFile(file, "{}");
+  const platform = process.platform;
+  const mock = t.mock.method(fs, "readFile", async () => {
+    const e = new Error("not permitted");
+    e.code = "EPERM";
+    throw e;
+  });
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  try {
+    await assert.rejects(bytesOrNull(file), /not permitted/);
+  } finally {
+    Object.defineProperty(process, "platform", { value: platform });
+  }
+  assert.equal(mock.mock.callCount(), 1);
+});
