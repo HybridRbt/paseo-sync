@@ -131,7 +131,7 @@ async function fixture(t, { installed = false, patch = false } = {}) {
         row.enabled = true;
         row.status = "running";
       }
-      if (action === "uninstall") {
+      if (action === "remove") {
         // Uninstalling removes the plugin's code and its settings directory.
         rows = rows.filter((x) => x.id !== id);
         await rm(path.join(home, "plugin-settings", id), {
@@ -2032,7 +2032,7 @@ test("reinstallRegistry aligns a registry version transition end to end and its 
   await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
   // Simulate the persistent host drift through the adapter itself: the
   // daemon upgraded the plugin to 2.0.0 from the registry listing.
-  await f.adapter.act("uninstall", "better-paseo");
+  await f.adapter.act("remove", "better-paseo");
   await f.adapter.install({
     ...f.plugin,
     revision: "2.0.0",
@@ -2040,6 +2040,14 @@ test("reinstallRegistry aligns a registry version transition end to end and its 
   });
   f.calls.length = 0;
   await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
+  // A host-only settings document the profile does not manage: removing the
+  // installation deletes the settings directory, so the reinstall must
+  // capture and rewrite it instead of losing it.
+  const hostOnly = path.join(
+    f.home,
+    "plugin-settings/better-paseo/extra.json",
+  );
+  await writeFile(hostOnly, JSON.stringify({ hostOnly: true }));
 
   const normal = await buildPlan(f.ctx);
   assert.ok(
@@ -2082,7 +2090,7 @@ test("reinstallRegistry aligns a registry version transition end to end and its 
   assert.equal(applied.changed, true);
   assert.equal(applied.verification.configurationMatches, true);
   assert.ok(
-    f.calls.some(([a, id]) => a === "uninstall" && id === "better-paseo"),
+    f.calls.some(([a, id]) => a === "remove" && id === "better-paseo"),
   );
   assert.ok(
     f.calls.some(
@@ -2091,10 +2099,14 @@ test("reinstallRegistry aligns a registry version transition end to end and its 
     ),
   );
   assert.ok(!f.calls.some(([a]) => a === "update"));
-  // Uninstall removed the settings directory; the reinstall path still
-  // rewrites the profile settings instead of tripping the concurrency guard.
+  // Removal deleted the settings directory; the reinstall path still
+  // rewrites the profile settings instead of tripping the concurrency guard,
+  // and restores the host-only document that is not part of the profile.
   assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")).values, {
     previewWrap: true,
+  });
+  assert.deepEqual(JSON.parse(await readFile(hostOnly, "utf8")), {
+    hostOnly: true,
   });
   const alignedRow = (await f.adapter.list())[0];
   assert.equal(alignedRow.installation.currentRevision, "1.0.0");
@@ -2119,7 +2131,7 @@ test("reinstallRegistry aligns a registry version transition end to end and its 
   f.calls.length = 0;
   await restore(f.ctx, applied.backupId, restorePreview.approval);
   assert.ok(
-    f.calls.some(([a, id]) => a === "uninstall" && id === "better-paseo"),
+    f.calls.some(([a, id]) => a === "remove" && id === "better-paseo"),
   );
   assert.ok(
     f.calls.some(
@@ -2129,10 +2141,165 @@ test("reinstallRegistry aligns a registry version transition end to end and its 
   );
   const restoredRow = (await f.adapter.list())[0];
   assert.equal(restoredRow.installation.currentRevision, "2.0.0");
-  // The backed-up local settings drift comes back with the rollback.
+  // The backed-up local settings drift comes back with the rollback, and the
+  // host-only document survives the restore-side reinstall as well.
   assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")).values, {
     previewWrap: false,
   });
+  assert.deepEqual(JSON.parse(await readFile(hostOnly, "utf8")), {
+    hostOnly: true,
+  });
+});
+
+test("reinstallRegistry never reinstalls a profile-disabled registry plugin", async (t) => {
+  const f = await fixture(t, { installed: true });
+  const registry = { url: "https://plugins.paseo.sh", id: "example/demo" };
+  f.manifest.plugins[0].registry = registry;
+  f.manifest.plugins[0].enabled = false;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  // The daemon upgraded the plugin to 2.0.0 while the profile pins 1.0.0
+  // disabled. Installing immediately enables code, so even the explicit
+  // reinstall mode must keep the disclosed skip instead of executing it.
+  await f.adapter.act("remove", "better-paseo");
+  await f.adapter.install({ ...f.plugin, revision: "2.0.0", registry });
+  await f.adapter.act("disable", "better-paseo");
+  f.calls.length = 0;
+
+  const plan = await buildPlan({
+    ...f.ctx,
+    preferProfile: true,
+    reinstallRegistry: true,
+  });
+  assert.equal(plan.reinstallRegistry, true);
+  assert.deepEqual(plan.conflicts, []);
+  assert.deepEqual(plan.skipped, [
+    {
+      plugin: "better-paseo",
+      reason: "registry-version-transition",
+      head: "2.0.0",
+      revision: "1.0.0",
+    },
+  ]);
+  const applied = await applyPlan(
+    { ...f.ctx, preferProfile: true, reinstallRegistry: true },
+    plan.approval,
+  );
+  assert.equal(applied.changed, false);
+  assert.ok(!f.calls.some(([a]) => a === "remove" || a === "install"));
+  assert.equal(
+    (await f.adapter.list())[0].installation.currentRevision,
+    "2.0.0",
+  );
+});
+
+test("a registry rollback pinned at a disabled revision refuses instead of reexecuting code", async (t) => {
+  const f = await fixture(t, { installed: true });
+  const registry = { url: "https://plugins.paseo.sh", id: "example/demo" };
+  f.manifest.plugins[0].registry = registry;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  await f.adapter.act("remove", "better-paseo");
+  await f.adapter.install({ ...f.plugin, revision: "2.0.0", registry });
+  const applied = await applyPlan(
+    { ...f.ctx, preferProfile: true, reinstallRegistry: true },
+    (
+      await buildPlan({
+        ...f.ctx,
+        preferProfile: true,
+        reinstallRegistry: true,
+      })
+    ).approval,
+  );
+  assert.equal(applied.changed, true);
+  // The backup pinned the pre-reinstall version, but as a disabled target:
+  // rolling it back would have to install (and therefore execute) it first.
+  const file = path.join(f.state, "backups", applied.backupId + ".json"),
+    b = JSON.parse(await readFile(file, "utf8"));
+  b.before.plugins["better-paseo"].descriptor.enabled = false;
+  await writeFile(file, JSON.stringify(b, null, 2));
+  f.calls.length = 0;
+  const preview = await restorePlan(f.ctx, applied.backupId);
+  assert.ok(
+    preview.conflicts.some((x) =>
+      /Exact registry version transition/i.test(x),
+    ),
+  );
+  assert.ok(
+    !preview.changes.some(
+      (c) => c.plugin === "better-paseo" && c.actions.includes("reinstall"),
+    ),
+  );
+  await assert.rejects(restore(f.ctx, applied.backupId, preview.approval), /registry/i);
+  assert.ok(!f.calls.some(([a]) => a === "remove" || a === "install"));
+});
+
+test("edits landing while a registry reinstall stops the plugin abort before removal", async (t) => {
+  const f = await fixture(t, { installed: true }),
+    { execFileSync } = await import("node:child_process");
+  const row = (await f.adapter.list())[0];
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", row.path, ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  const pinned = git("rev-parse", "HEAD");
+  await writeFile(path.join(row.path, "notes.txt"), "second\n");
+  git("add", ".");
+  git("commit", "-qm", "drift");
+  const drifted = git("rev-parse", "HEAD");
+  f.manifest.plugins[0].source = "git:https://github.com/example/demo";
+  f.manifest.plugins[0].revision = pinned;
+  f.manifest.plugins[0].registry = {
+    url: "https://plugins.paseo.sh",
+    id: "example/demo",
+  };
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    rows[0].installation = {
+      identity: {
+        kind: "git",
+        remote: "https://github.com/example/demo",
+        pluginPath: ".",
+        registry: { url: "https://plugins.paseo.sh", id: "example/demo" },
+      },
+      currentRevision: drifted,
+    };
+    return rows;
+  };
+  const ctx = { ...f.ctx, preferProfile: true, reinstallRegistry: true };
+  const plan = await buildPlan(ctx);
+  assert.ok(
+    plan.changes.some(
+      (c) => c.plugin === "better-paseo" && c.actions.includes("reinstall"),
+    ),
+  );
+  // An editor saves a tracked file while the plugin is being disabled; the
+  // removal must never run once the checkout no longer matches the snapshot.
+  const act = f.adapter.act;
+  f.adapter.act = async (action, id) => {
+    if (action === "disable")
+      await writeFile(path.join(row.path, "index.client.tsx"), "local work");
+    return act(action, id);
+  };
+  f.calls.length = 0;
+  await assert.rejects(
+    applyPlan(ctx, plan.approval),
+    /Local source changed while stopping/,
+  );
+  assert.equal(
+    await readFile(path.join(row.path, "index.client.tsx"), "utf8"),
+    "local work",
+  );
+  assert.ok(!f.calls.some(([a]) => a === "remove" || a === "install"));
 });
 
 test("registry reinstall disclosures and action labels render bilingually", async () => {
@@ -2144,6 +2311,11 @@ test("registry reinstall disclosures and action labels render bilingually", asyn
     ),
   );
   assert.ok(english("卸载并重装").includes("reinstall"));
+  assert.ok(
+    english(
+      "重装将按清单来源直装（npm 固定版本或 Git 固定提交），不再保留注册表安装来源；此后本机更新检查将使用该直装来源。",
+    ).includes("no longer keeps the registry provenance"),
+  );
   assert.ok(
     english(
       "已启用「注册表插件重装对齐」模式：版本不一致的注册表插件将卸载并重装为云端固定版本。",

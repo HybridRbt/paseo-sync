@@ -7,8 +7,8 @@ const english = {
     "Skipped {plugin}: local development or untracked plugin; it is not applied on this host.",
   "本机安装目录：{checkout}":
     "Installed at: {checkout}",
-  "该插件本次保持本机现状，未被同步修改。请先核对其安装来源或移除该安装（如 paseo plugin uninstall {plugin}），再重新预览差异。":
-    "The plugin stays as installed on this host. Inspect or remove the installation (e.g. `paseo plugin uninstall {plugin}`), then preview the changes again.",
+  "该插件本次保持本机现状，未被同步修改。请先核对其安装来源或移除该安装（如 paseo plugin remove {plugin}），再重新预览差异。":
+    "The plugin stays as installed on this host. Inspect or remove the installation (e.g. `paseo plugin remove {plugin}`), then preview the changes again.",
   "跳过 {plugin}：备份或本机插件缺少可识别的安装来源，本次恢复不改动该插件。":
     "Skipped {plugin}: the install source is not identifiable from the backup or on this host; the restore leaves the plugin untouched.",
   "跳过 {plugin}：注册表安装插件不支持直接切换固定版本（本机 {head}，云端 {revision}），本次保留本机版本。":
@@ -20,6 +20,8 @@ const english = {
   "已启用「注册表插件重装对齐」模式：版本不一致的注册表插件将卸载并重装为云端固定版本。":
     "“Registry reinstall alignment” mode enabled: registry plugins with differing versions will be uninstalled and reinstalled at the pinned cloud version.",
   "卸载并重装": "Uninstall and reinstall",
+  "重装将按清单来源直装（npm 固定版本或 Git 固定提交），不再保留注册表安装来源；此后本机更新检查将使用该直装来源。":
+    "The reinstall installs directly from the profile source (pinned npm version or Git commit) and no longer keeps the registry provenance; local update checks will use the direct source afterwards.",
   "本机配置与云端存在冲突：{label}。可选择「用本机配置覆盖云端」或「忽略本机改动，用云端覆盖本机」。":
     "Local changes conflict with the cloud profile: {label}. Choose “Overwrite cloud with this host” or “Ignore local changes and apply cloud profile”.",
   "注册表安装的插件不支持直接切换历史版本：{plugin}。可选择「用本机配置覆盖云端」，或选择「用云端覆盖本机」保留本机版本，或选择「卸载重装注册表插件对齐」直接重装云端固定版本。":

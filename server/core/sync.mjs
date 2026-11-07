@@ -1,7 +1,15 @@
 import { sourceState } from "./source-state.mjs";
 import { acquireOperation } from "./lock.mjs";
 import { randomUUID } from "node:crypto";
-import { readFile, mkdir, rm, lstat, writeFile, rename } from "node:fs/promises";
+import {
+  readFile,
+  readdir,
+  mkdir,
+  rm,
+  lstat,
+  writeFile,
+  rename,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -120,6 +128,39 @@ function preserveSkippedBaseline(state, previous, profile, ids) {
 }
 async function settingsFile(ctx, s) {
   return safeFile(ctx.home, `plugin-settings/${s.plugin}/${s.document}.json`);
+}
+// Removing an installation deletes its settings directory, and the profile
+// only manages its allowlisted documents: every other settings file under
+// the plugin's directory is host-only data that a reinstall must capture
+// before removal and rewrite after installation.
+async function readHostOnlySettings(ctx, profile, plugin) {
+  const managed = new Set(
+    profile.settings
+      .filter((s) => s.plugin === plugin)
+      .map((s) => `${s.document}.json`),
+  );
+  const captured = {};
+  let names = [];
+  try {
+    names = await readdir(await safeFile(ctx.home, `plugin-settings/${plugin}`));
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
+  for (const name of names) {
+    if (managed.has(name) || !name.endsWith(".json")) continue;
+    const raw = await bytesOrNull(
+      await safeFile(ctx.home, `plugin-settings/${plugin}/${name}`),
+    );
+    if (raw !== null) captured[name] = raw.toString("base64");
+  }
+  return captured;
+}
+async function writeHostOnlySettings(ctx, plugin, captured) {
+  for (const [name, b64] of Object.entries(captured ?? {}))
+    await atomicWrite(
+      await safeFile(ctx.home, `plugin-settings/${plugin}/${name}`),
+      Buffer.from(b64, "base64"),
+    );
 }
 async function installedFile(ctx, row, name) {
   if (!path.isAbsolute(row.path))
@@ -627,7 +668,7 @@ async function planData(ctx) {
     // An exact registry version transition cannot be expressed as an in-place
     // update (the daemon only offers approved registry upgrades). Under
     // preferProfile it stays a disclosed skip; the explicit reinstall mode
-    // aligns it by uninstalling and reinstalling the profile's pinned
+    // aligns it by removing and reinstalling the profile's pinned
     // revision instead.
     const registryTransition =
       blocked &&
@@ -639,7 +680,10 @@ async function planData(ctx) {
       (now.pluginPath ?? ".") === (target.pluginPath ?? ".") &&
       target.id !== selfId &&
       target.id !== "paseo-sync";
-    if (registryTransition && !ctx.reinstallRegistry) {
+    // Installing immediately enables code, so a target the profile wants
+    // disabled is never reinstalled (the missing-disabled guard blocks the
+    // same transition for absent plugins); it keeps the disclosed skip.
+    if (registryTransition && !(ctx.reinstallRegistry && target.enabled)) {
       skipped.push({
         plugin: target.id,
         reason: "registry-version-transition",
@@ -950,8 +994,23 @@ export async function applyPlan(ctx, approval) {
       }
       if (change.actions.includes("reinstall")) {
         // The daemon cannot express an exact registry version transition as
-        // an update; align by uninstalling and installing the pinned revision.
-        await ctx.adapter.act("uninstall", id);
+        // an update; align by removing and installing the pinned revision.
+        // Like the update path, edits that landed while the plugin was being
+        // disabled must abort before the destructive removal, and removing an
+        // installation deletes its settings directory, so host-only settings
+        // documents are captured into the backup first and rewritten after.
+        const latest = (await ctx.adapter.list()).find((p) => p.id === id);
+        if (
+          !latest ||
+          !same(await sourceState(latest, profile), before.sourceState ?? null)
+        )
+          throw new Error(`Local source changed while stopping ${id}`);
+        backup.hostOnlySettings = {
+          ...backup.hostOnlySettings,
+          [id]: await readHostOnlySettings(ctx, profile, id),
+        };
+        await writeJson(filename, backup);
+        await ctx.adapter.act("remove", id);
         await ctx.adapter.install(target);
         const row = (await ctx.adapter.list()).find((x) => x.id === id);
         if (!row) throw new Error(`Install returned no plugin: ${id}`);
@@ -982,8 +1041,8 @@ export async function applyPlan(ctx, approval) {
       for (const s of affectedSettings) {
         const file = await settingsFile(ctx, s),
           raw = await bytesOrNull(file);
-        // Uninstalling removes and reinstalling may recreate settings files,
-        // so the byte-for-byte guard only covers in-place version changes.
+        // Removal deletes and reinstalling may recreate settings files, so
+        // the byte-for-byte guard only covers in-place version changes.
         if (
           !change.actions.includes("reinstall") &&
           (raw === null ? null : raw.toString("base64")) !==
@@ -997,6 +1056,7 @@ export async function applyPlan(ctx, approval) {
         )
           await writeJson(file, s.data);
       }
+      await writeHostOnlySettings(ctx, id, backup.hostOnlySettings?.[id]);
       if (target.enabled) await ctx.adapter.act("enable", id);
     }
     const verification = await verify(ctx, skippedIds);
@@ -1098,10 +1158,13 @@ export async function restorePlan(ctx, id) {
     if (before) {
       // An exact registry version transition cannot be expressed as an
       // in-place update, so restoring the backed-up pinned revision
-      // uninstalls and reinstalls it (mirroring the apply-side reinstall)
+      // removes and reinstalls it (mirroring the apply-side reinstall)
       // instead of refusing the whole restore.
       const nowDescriptor = now?.descriptor ?? null;
+      // Installing immediately enables code, so a backup whose pinned
+      // revision was disabled is never rolled back through a reinstall.
       const registryRollback =
+        before.descriptor.enabled &&
         nowDescriptor?.registry &&
         nowDescriptor.revision !== before.descriptor.revision &&
         nowDescriptor.source === before.descriptor.source &&
@@ -1278,9 +1341,10 @@ export async function restore(ctx, id, approval) {
             ctx,
           )) ?? snapshotPlugin(row))
         : null;
-      // Registry rollback uses uninstall + install of the backed-up pinned
+      // Registry rollback uses remove + install of the backed-up pinned
       // revision, exactly like the apply-side reinstall mode.
       const registryRollback =
+        before.descriptor.enabled &&
         currentDescriptor?.registry &&
         row &&
         currentDescriptor.revision !== before.descriptor.revision &&
@@ -1305,7 +1369,14 @@ export async function restore(ctx, id, approval) {
             row?.path,
           );
         } else if (registryRollback) {
-          await ctx.adapter.act("uninstall", target.id);
+          // Removing the installation deletes its settings directory;
+          // capture host-only documents first and rewrite them afterwards.
+          b.hostOnlySettings = {
+            ...b.hostOnlySettings,
+            [target.id]: await readHostOnlySettings(ctx, b.profile, target.id),
+          };
+          await writeJson(await backupFile(ctx, id), b);
+          await ctx.adapter.act("remove", target.id);
           await ctx.adapter.install(before.descriptor);
         } else {
           if (row) await ctx.adapter.update(before.descriptor);
@@ -1331,14 +1402,15 @@ export async function restore(ctx, id, approval) {
       for (const s of b.profile.settings.filter(
         (x) => x.plugin === target.id,
       )) {
-        // After a registry rollback the settings baseline was reset by
-        // uninstall/reinstall; the backup bytes are written unconditionally.
+        // After a registry rollback the settings baseline was reset by the
+        // removal; the backup bytes are written unconditionally.
         if (!registryRollback) await assertCurrentSettings(target.id);
         const file = await settingsFile(ctx, s),
           raw = b.before.settings[s.file];
         if (raw === null) await rm(file, { force: true });
         else await atomicWrite(file, Buffer.from(raw, "base64"));
       }
+      await writeHostOnlySettings(ctx, target.id, b.hostOnlySettings?.[target.id]);
       if (before.descriptor.enabled) await ctx.adapter.act("enable", target.id);
     }
     const restored = await capture(ctx, b.profile);

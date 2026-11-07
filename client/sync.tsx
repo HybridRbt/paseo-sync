@@ -1377,7 +1377,7 @@ export function ResultSummary({
               ) : null}
               <Text selectable style={text}>
                 {t(
-                  "该插件本次保持本机现状，未被同步修改。请先核对其安装来源或移除该安装（如 paseo plugin uninstall {plugin}），再重新预览差异。",
+                  "该插件本次保持本机现状，未被同步修改。请先核对其安装来源或移除该安装（如 paseo plugin remove {plugin}），再重新预览差异。",
                   { plugin: s.plugin },
                 )}
               </Text>
@@ -1456,6 +1456,13 @@ export function ResultSummary({
                 .map((a) => t(a))
                 .join(", ")}
             </Text>
+            {c.actions.includes("reinstall") ? (
+              <Text selectable style={text}>
+                {t(
+                  "重装将按清单来源直装（npm 固定版本或 Git 固定提交），不再保留注册表安装来源；此后本机更新检查将使用该直装来源。",
+                )}
+              </Text>
+            ) : null}
             {c.settings?.map((s) => (
               <Text selectable key={s.document} style={text}>
                 {s.document}：{JSON.stringify(s.before)} →{" "}
