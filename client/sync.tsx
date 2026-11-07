@@ -1100,12 +1100,12 @@ export function CheckoutShortcuts({
                 ? t("已打开终端")
                 : t("已在文件管理器中打开")
               : status.status === "unsupported"
-                ? t("当前平台不支持该快捷方式。")
+                ? t("当前平台不支持该快捷方式。可点击「复制路径」获取目录路径。")
                 : status.type === "copy"
                   ? t("复制失败：{error}，路径已显示在上方，可手动选中复制。", {
                       error: status.error || t("未知错误"),
                     })
-                  : t("打开失败：{error}", {
+                  : t("打开失败：{error}。可点击「复制路径」获取目录路径。", {
                       error: status.error || t("未知错误"),
                     })}
         </Text>

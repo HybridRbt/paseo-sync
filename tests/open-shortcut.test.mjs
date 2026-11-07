@@ -236,15 +236,15 @@ test("bilingual translations cover all checkout shortcut labels and feedback", a
     ["已打开终端", "Terminal opened", "已打开终端"],
     ["已在文件管理器中打开", "Opened in file manager", "已在文件管理器中打开"],
     [
-      "打开失败：{error}",
-      "Failed to open: Permission denied",
-      "打开失败：Permission denied",
+      "打开失败：{error}。可点击「复制路径」获取目录路径。",
+      "Failed to open: Permission denied. Use “Copy path” to get the checkout path.",
+      "打开失败：Permission denied。可点击「复制路径」获取目录路径。",
       { error: "Permission denied" },
     ],
     [
-      "当前平台不支持该快捷方式。",
-      "Shortcut unsupported on this platform.",
-      "当前平台不支持该快捷方式。",
+      "当前平台不支持该快捷方式。可点击「复制路径」获取目录路径。",
+      "Shortcut unsupported on this platform. Use “Copy path” to get the checkout path.",
+      "当前平台不支持该快捷方式。可点击「复制路径」获取目录路径。",
     ],
     ["未知错误", "Unknown error", "未知错误"],
     [
