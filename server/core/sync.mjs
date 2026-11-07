@@ -1102,7 +1102,10 @@ export async function applyPlan(ctx, approval) {
         )
           await writeJson(file, s.data);
       }
-      await writeHostOnlySettings(ctx, id, backup.hostOnlySettings?.[id]);
+      // Only a reinstall removed the settings directory; its host-only
+      // documents were freshly captured right before that removal.
+      if (change.actions.includes("reinstall"))
+        await writeHostOnlySettings(ctx, id, backup.hostOnlySettings?.[id]);
       if (target.enabled) await ctx.adapter.act("enable", id);
     }
     const verification = await verify(ctx, skippedIds);
@@ -1456,7 +1459,17 @@ export async function restore(ctx, id, approval) {
         if (raw === null) await rm(file, { force: true });
         else await atomicWrite(file, Buffer.from(raw, "base64"));
       }
-      await writeHostOnlySettings(ctx, target.id, b.hostOnlySettings?.[target.id]);
+      // Host-only documents are rewritten only when the rollback actually
+      // removed the installation (freshly captured right before). An
+      // in-place restore never removed them, and the pre-apply capture is
+      // both stale and invisible to the drift guard: current local edits
+      // must survive untouched.
+      if (registryRollback)
+        await writeHostOnlySettings(
+          ctx,
+          target.id,
+          b.hostOnlySettings?.[target.id],
+        );
       if (before.descriptor.enabled) await ctx.adapter.act("enable", target.id);
     }
     const restored = await capture(ctx, b.profile);

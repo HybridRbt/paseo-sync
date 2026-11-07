@@ -2235,6 +2235,64 @@ test("a registry rollback pinned at a disabled revision refuses instead of reexe
   assert.ok(!f.calls.some(([a]) => a === "remove" || a === "install"));
 });
 
+test("an in-place restore after a registry reinstall preserves current host-only settings", async (t) => {
+  const f = await fixture(t, { installed: true });
+  const registry = { url: "https://plugins.paseo.sh", id: "example/demo" };
+  f.manifest.plugins[0].registry = registry;
+  await writeJson(path.join(f.root, "profile.json"), f.manifest);
+  await applyPlan(f.ctx, (await buildPlan(f.ctx)).approval);
+  await f.adapter.act("remove", "better-paseo");
+  await f.adapter.install({ ...f.plugin, revision: "2.0.0", registry });
+  // The host-only document exists before the reinstall, so the apply-time
+  // backup captures its pre-apply bytes.
+  const hostOnly = path.join(
+    f.home,
+    "plugin-settings/better-paseo/extra.json",
+  );
+  await writeJson(hostOnly, { v: 1 });
+  // A local settings drift so the backup's before-state has managed bytes
+  // that the restore rolls back.
+  await writeJson(f.setting, { version: 1, values: { previewWrap: false } });
+  const applied = await applyPlan(
+    { ...f.ctx, preferProfile: true, reinstallRegistry: true },
+    (
+      await buildPlan({
+        ...f.ctx,
+        preferProfile: true,
+        reinstallRegistry: true,
+      })
+    ).approval,
+  );
+  assert.equal(applied.changed, true);
+  // The production adapter's reinstall drops registry provenance, so the
+  // installed row no longer classifies as a registry rollback and the
+  // restore takes the ordinary in-place update path, with no removal.
+  const list = f.adapter.list;
+  f.adapter.list = async () => {
+    const rows = await list();
+    delete rows[0].installation.identity.registry;
+    return rows;
+  };
+  // Local edits to the host-only document after the apply must survive the
+  // in-place restore; they are invisible to the drift guard by design.
+  await writeJson(hostOnly, { editedAfterApply: true });
+  const preview = await restorePlan(f.ctx, applied.backupId);
+  assert.deepEqual(preview.conflicts, []);
+  assert.equal(preview.currentChangedSinceBackup, false);
+  assert.ok(
+    !preview.changes.some((c) => c.actions.includes("reinstall")),
+  );
+  await restore(f.ctx, applied.backupId, preview.approval);
+  assert.deepEqual(JSON.parse(await readFile(hostOnly, "utf8")), {
+    editedAfterApply: true,
+  });
+  // The profile-managed settings document still rolls back to the backed-up
+  // local drift, while the host-only document keeps the newer local edit.
+  assert.deepEqual(JSON.parse(await readFile(f.setting, "utf8")).values, {
+    previewWrap: false,
+  });
+});
+
 test("edits landing while a registry reinstall stops the plugin abort before removal", async (t) => {
   const f = await fixture(t, { installed: true }),
     { execFileSync } = await import("node:child_process");
