@@ -3,7 +3,6 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
-  readFile,
   rename,
   rm,
   writeFile,
@@ -55,9 +54,28 @@ export async function safeFile(root, relative) {
   }
   return path.join(absoluteRoot, ...relative.split("/"));
 }
+// Windows antivirus scanners and sibling processes can briefly hold a handle on
+// files this plugin owns, surfacing as EPERM/EACCES/EBUSY on open or rename.
+// Retry those a few times with backoff; every other error propagates unchanged.
+async function retryShareConflict(operation) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (
+        process.platform !== "win32" ||
+        !["EPERM", "EACCES", "EBUSY"].includes(error.code) ||
+        attempt >= 5
+      )
+        throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20 * 2 ** attempt));
+    }
+  }
+}
 export async function bytesOrNull(file) {
   try {
-    return await readFile(file);
+    // Called through fs.readFile, not the named import, so tests can stub it.
+    return await retryShareConflict(() => fs.readFile(file));
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw e;
@@ -72,20 +90,7 @@ export async function atomicWrite(file, data) {
   const temporary = `${file}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, data, { mode: 0o600, flag: "wx" });
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await fs.rename(temporary, file);
-        break;
-      } catch (error) {
-        if (
-          process.platform !== "win32" ||
-          !["EPERM", "EACCES", "EBUSY"].includes(error.code) ||
-          attempt >= 5
-        )
-          throw error;
-        await new Promise((resolve) => setTimeout(resolve, 20 * 2 ** attempt));
-      }
-    }
+    await retryShareConflict(() => fs.rename(temporary, file));
   } finally {
     await rm(temporary, { force: true });
   }
