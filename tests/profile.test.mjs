@@ -159,6 +159,51 @@ test("normalizes the legacy rowLabels and hoverDelay spellings the daemon keeps 
     values: { rowLabels: true, hoverDelay: "2s" },
   });
   assert.deepEqual(normalizeSettings(once), once);
+  // Retired detailsTextZoom from older better-paseo versions is dropped during normalization.
+  assert.deepEqual(
+    normalizeSettings({
+      version: 1,
+      values: { detailsTextZoom: 3, previewWrap: true },
+    }),
+    {
+      version: 1,
+      values: { previewWrap: true },
+    },
+  );
+  assert.deepEqual(
+    normalizeSettings({
+      version: 1,
+      values: { detailsTextZoom: 0, detailsFontSize: 16 },
+    }),
+    {
+      version: 1,
+      values: { detailsFontSize: 16 },
+    },
+  );
+  // Normalized document with retired detailsTextZoom validates cleanly.
+  assert.doesNotThrow(() =>
+    validateSettings(
+      "better-paseo",
+      "presentation",
+      normalizeSettings({
+        version: 1,
+        values: { detailsTextZoom: 2, previewWrap: true },
+      }),
+    ),
+  );
+  // Fields that are still unknown after normalization reject by name, while retired detailsTextZoom is omitted from the error.
+  assert.throws(
+    () =>
+      validateSettings(
+        "better-paseo",
+        "presentation",
+        normalizeSettings({
+          version: 1,
+          values: { detailsTextZoom: 2, token: "secret", rowClick: true },
+        }),
+      ),
+    /^Error: Unsupported presentation fields: token, rowClick$/,
+  );
   // Fields that are still unknown after normalization reject by name.
   assert.throws(
     () =>
@@ -167,6 +212,15 @@ test("normalizes the legacy rowLabels and hoverDelay spellings the daemon keeps 
         values: { token: "secret", rowClick: true },
       }),
     /Unsupported presentation fields: token, rowClick/,
+  );
+  // An un-normalized document carrying detailsTextZoom is rejected by name.
+  assert.throws(
+    () =>
+      validateSettings("better-paseo", "presentation", {
+        version: 1,
+        values: { detailsTextZoom: 2 },
+      }),
+    /^Error: Unsupported presentation fields: detailsTextZoom$/,
   );
 });
 

@@ -66,7 +66,7 @@ test("export canonicalizes legacy live spellings instead of failing or publishin
   const ctx = await fixture();
   await writeJson(
     path.join(ctx.home, "plugin-settings/better-paseo/presentation.json"),
-    { version: 1, values: { previewWrap: true, rowLabels: true, hoverDelay: "1s" } },
+    { version: 1, values: { previewWrap: true, rowLabels: true, hoverDelay: "1s", detailsTextZoom: 2 } },
   );
   const result = await exportProfile(ctx);
   assert.equal(result.settings, 1);
