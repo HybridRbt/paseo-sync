@@ -52,3 +52,24 @@ test("Windows transient file sharing errors do not fail the owner.json read", as
     Object.defineProperty(process, "platform", { value: platform });
   }
 });
+test("best-effort probes opt out of the Windows retry waits", async (t) => {
+  const base = await fs.mkdtemp(path.join(tmpdir(), "paseo-probe-")),
+    file = path.join(base, "paseo-plugin.json");
+  await fs.writeFile(file, "{}");
+  const platform = process.platform;
+  const mock = t.mock.method(fs, "readFile", async () => {
+    const e = new Error("inaccessible manifest");
+    e.code = "EACCES";
+    throw e;
+  });
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    await assert.rejects(
+      bytesOrNull(file, { retry: false }),
+      /inaccessible manifest/,
+    );
+  } finally {
+    Object.defineProperty(process, "platform", { value: platform });
+  }
+  assert.equal(mock.mock.callCount(), 1);
+});

@@ -74,17 +74,21 @@ const windowsRetry = async (operation) => {
     }
   }
 };
-export async function bytesOrNull(file) {
+export async function bytesOrNull(file, { retry = true } = {}) {
   try {
     // Called through fs.readFile, not the named import, so tests can stub it.
-    return await windowsRetry(() => fs.readFile(file));
+    const read = () => fs.readFile(file);
+    // Best-effort probes of foreign plugin paths pass retry:false so an
+    // inaccessible manifest fails fast instead of stalling a whole batch
+    // preview with one full retry budget per miss.
+    return await (retry ? windowsRetry(read) : read());
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw e;
   }
 }
-export async function jsonOrNull(file) {
-  const data = await bytesOrNull(file);
+export async function jsonOrNull(file, opts) {
+  const data = await bytesOrNull(file, opts);
   return data === null ? null : JSON.parse(data.toString("utf8"));
 }
 export async function atomicWrite(file, data) {
