@@ -1436,9 +1436,13 @@ export async function restore(ctx, id, approval) {
         }
         row = (await ctx.adapter.list()).find((x) => x.id === target.id);
         if (row?.enabled) await ctx.adapter.act("disable", target.id);
-        // Uninstall/reinstall legitimately removes and recreates settings
-        // files, so the byte-for-byte guard only covers in-place moves.
-        if (!registryRollback) await assertCurrentSettings(target.id);
+        // A reinstall (registry rollback, or recovery from a failed one that
+        // removed the installation) legitimately recreates settings files
+        // with fresh defaults, so the byte-for-byte guard only covers
+        // in-place moves. The pre-install check above still guards the
+        // absent state.
+        if (!registryRollback && !reinstallFromAbsent)
+          await assertCurrentSettings(target.id);
       }
       for (const bundle of b.profile.patches.filter(
         (x) => x.plugin === target.id,
@@ -1454,9 +1458,11 @@ export async function restore(ctx, id, approval) {
       for (const s of b.profile.settings.filter(
         (x) => x.plugin === target.id,
       )) {
-        // After a registry rollback the settings baseline was reset by the
-        // removal; the backup bytes are written unconditionally.
-        if (!registryRollback) await assertCurrentSettings(target.id);
+        // After a registry rollback or a reinstall from absent the settings
+        // baseline was reset by a removal; the backup bytes are written
+        // unconditionally over any recreated defaults.
+        if (!registryRollback && !reinstallFromAbsent)
+          await assertCurrentSettings(target.id);
         const file = await settingsFile(ctx, s),
           raw = b.before.settings[s.file];
         if (raw === null) await rm(file, { force: true });

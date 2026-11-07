@@ -2311,17 +2311,23 @@ test("a restore recovers host-only settings captured before a failed reinstall",
   const plan = await buildPlan(ctx);
   // The removal succeeds but the installation fails (e.g. no network): the
   // captured host-only documents survive only inside the failed backup.
+  // Successful installs recreate managed settings documents with fresh
+  // defaults, exactly like the daemon does.
   const install = f.adapter.install;
   f.adapter.install = async (p) => {
     if (p.revision === "1.0.0") throw new Error("network unavailable");
-    return install(p);
+    const result = await install(p);
+    await writeJson(f.setting, {
+      version: 1,
+      values: { freshDefaults: true },
+    });
+    return result;
   };
   let failure;
   await assert.rejects(applyPlan(ctx, plan.approval), (e) => {
     failure = e;
     return Boolean(e.backupId);
   });
-  f.adapter.install = install;
   const preview = await restorePlan(f.ctx, failure.backupId);
   assert.deepEqual(preview.conflicts, []);
   await restore(f.ctx, failure.backupId, preview.approval);
