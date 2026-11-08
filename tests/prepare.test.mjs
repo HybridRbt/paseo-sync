@@ -196,3 +196,19 @@ test("a timed-out build command rejects promptly even while a grandchild holds t
     `timeout rejection should be bounded by the tree kill, took ${elapsed}ms`,
   );
 });
+
+test("a timed-out build rejects even when the launcher already exited zero", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "prepare-"));
+  // The launcher exits 0 immediately while the descendant keeps building on
+  // inherited pipes; the timeout must still fail the run instead of letting
+  // the launcher's exit code read as success (Codex P2).
+  const script =
+    'const { spawn } = require("child_process");' +
+    'spawn(process.execPath, ["-e", "setTimeout(() => {}, 3000)"], { stdio: ["ignore", 1, 2] });';
+  await assert.rejects(
+    runPluginBuildCommands(dir, [[process.execPath, "-e", script]], {
+      timeoutMs: 400,
+    }),
+    /failed \(timed out\)/,
+  );
+});

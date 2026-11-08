@@ -126,7 +126,8 @@ function runCommand(directory, command, options) {
     const isWindows = options.platform === "win32";
     let stdout = "",
       stderr = "",
-      spawnError = null;
+      spawnError = null,
+      timedOut = false;
     let settled = false;
     let timeoutTimer = null,
       forceTimer = null;
@@ -135,7 +136,7 @@ function runCommand(directory, command, options) {
       settled = true;
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (forceTimer) clearTimeout(forceTimer);
-      resolve(result);
+      resolve({ ...result, timedOut });
     };
     let child;
     try {
@@ -153,6 +154,7 @@ function runCommand(directory, command, options) {
     if (options.timeoutMs) {
       timeoutTimer = setTimeout(() => {
         if (settled) return;
+        timedOut = true;
         stderr += `\nBuild command timed out after ${options.timeoutMs}ms`;
         (options.killTree ?? killProcessTree)(child, options.platform);
         // Killing the tree normally delivers `close` promptly, but a
@@ -191,6 +193,13 @@ export async function runPluginBuildCommands(directory, commands, options = {}) 
     if (result.error)
       throw new Error(
         `Plugin build command failed to start: ${formatCommand(command)}\n${result.error.message}`,
+      );
+    // A launcher may exit 0 while a descendant is still building on inherited
+    // pipes; once the timeout fired, the run is a failure whatever exit code
+    // the launcher then reports (Codex P2).
+    if (result.timedOut)
+      throw new Error(
+        `Plugin build command failed (timed out): ${formatCommand(command)}${formatOutput(result)}`,
       );
     if (result.exitCode !== 0)
       throw new Error(
