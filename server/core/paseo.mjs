@@ -110,6 +110,8 @@ async function locate(explicit) {
           ),
         ]
       : [
+          // Paseo's first-run setup drops a trampoline here on fresh Windows installs.
+          path.join(os.homedir(), ".local", "bin", "paseo.cmd"),
           path.join(
             process.env.LOCALAPPDATA ?? os.homedir(),
             "Programs",
@@ -124,45 +126,89 @@ async function locate(explicit) {
     "Paseo CLI not found. Install its CLI entry from Paseo, or pass --paseo <absolute executable/shim path>.",
   );
 }
+// Paseo's first-run setup writes a .cmd trampoline at %USERPROFILE%\.local\bin\paseo.cmd that
+// bakes in only the bundled shim's path. Recognize that exact shape and return the target —
+// resolution then validates the target instead of executing the trampoline.
+export function trampolineTarget(content) {
+  if (typeof content !== "string" || content.length > 65536) return null;
+  const text = content.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  const set = text.match(
+    /^[^\S\n]*set[^\S\n]+"BUNDLED_CLI=([^"\n]+)"[^\S\n]*$/im,
+  );
+  if (!set) return null;
+  if (!/^[^\S\n]*call[^\S\n]+"%BUNDLED_CLI%"/im.test(text)) return null;
+  const target = set[1].trim();
+  // Absolute local or UNC path only; %VAR% expansion is never interpreted.
+  if (!/^(?:[a-z]:[\\/]|\\\\)/i.test(target) || /["%\n]/.test(target))
+    return null;
+  return target;
+}
+
+async function desktopLayout(shim) {
+  const desktop = windowsLaunch(shim);
+  return (await exists(desktop.command)) && (await exists(desktop.args[1]))
+    ? desktop
+    : null;
+}
+
+async function trampolineLayout(executable) {
+  let content;
+  try {
+    content = await readFile(executable, "utf8");
+  } catch {
+    return null;
+  }
+  const target = trampolineTarget(content);
+  if (!target) return null;
+  const shim = path.win32.resolve(target);
+  const desktop = await desktopLayout(shim);
+  if (!desktop)
+    throw new Error(
+      `Paseo CLI trampoline ${executable} points to a bundled CLI at ${shim} that is missing; reinstall the Paseo desktop app or set the plugin CLI path setting.`,
+    );
+  return desktop;
+}
+
+export async function resolveWindowsLaunch(executable) {
+  const desktop =
+    (await desktopLayout(executable)) ?? (await trampolineLayout(executable));
+  if (desktop) return desktop;
+  // npm's normal global shim: resolve its package bin without executing cmd.exe.
+  const unsupported = () =>
+    new Error(
+      `Unsupported Windows Paseo shim ${executable}; use the official desktop CLI or npm @getpaseo/cli, or set the plugin CLI path setting.`,
+    );
+  const packageRoot = path.join(
+    path.dirname(executable),
+    "node_modules",
+    "@getpaseo",
+    "cli",
+  );
+  let pkg;
+  try {
+    pkg = JSON.parse(
+      await readFile(path.join(packageRoot, "package.json"), "utf8"),
+    );
+  } catch (e) {
+    if (e.code === "ENOENT") throw unsupported();
+    throw e;
+  }
+  const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.paseo;
+  if (!bin || path.isAbsolute(bin) || bin.split(/[\\/]/).includes(".."))
+    throw unsupported();
+  return {
+    command: process.execPath,
+    args: [path.join(packageRoot, bin)],
+    env: {},
+    shell: false,
+  };
+}
+
 export async function makeAdapter(home, explicit) {
   const executable = await realpath(await locate(explicit));
   let launch = { command: executable, args: [], env: {}, shell: false };
-  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(executable)) {
-    const desktop = windowsLaunch(executable);
-    if ((await exists(desktop.command)) && (await exists(desktop.args[1])))
-      launch = desktop;
-    else {
-      // npm's normal global shim: resolve its package bin without executing cmd.exe.
-      const unsupported = () =>
-        new Error(
-          `Unsupported Windows Paseo shim ${executable}; use the official desktop CLI or npm @getpaseo/cli, or set the plugin CLI path setting.`,
-        );
-      const packageRoot = path.join(
-        path.dirname(executable),
-        "node_modules",
-        "@getpaseo",
-        "cli",
-      );
-      let pkg;
-      try {
-        pkg = JSON.parse(
-          await readFile(path.join(packageRoot, "package.json"), "utf8"),
-        );
-      } catch (e) {
-        if (e.code === "ENOENT") throw unsupported();
-        throw e;
-      }
-      const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.paseo;
-      if (!bin || path.isAbsolute(bin) || bin.split(/[\\/]/).includes(".."))
-        throw unsupported();
-      launch = {
-        command: process.execPath,
-        args: [path.join(packageRoot, bin)],
-        env: {},
-        shell: false,
-      };
-    }
-  }
+  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(executable))
+    launch = await resolveWindowsLaunch(executable);
   const call = async (args) => {
     try {
       const childEnv = { ...process.env, ...launch.env };

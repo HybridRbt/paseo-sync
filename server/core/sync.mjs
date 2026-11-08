@@ -1,7 +1,16 @@
 import { sourceState } from "./source-state.mjs";
 import { acquireOperation } from "./lock.mjs";
 import { randomUUID } from "node:crypto";
-import { readFile, mkdir, rm, lstat, writeFile, rename, realpath } from "node:fs/promises";
+import {
+  readFile,
+  readdir,
+  mkdir,
+  rm,
+  lstat,
+  writeFile,
+  rename,
+  realpath,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -22,14 +31,17 @@ import {
   pluginIdentity,
   patchText,
   validateSettings,
+  normalizeSettings,
 } from "./profile.mjs";
 import {
   unpackBundle,
   packPluginDirectory,
   attachPatchOriginalBytes,
+  fingerprintDirectory,
   BUNDLE_MARKER,
   resolveBundleArchive,
 } from "./bundle.mjs";
+import { prepareBundleDirectory } from "./prepare.mjs";
 
 function skipMissingDisabled(ctx, current, target) {
   return (
@@ -121,6 +133,99 @@ function preserveSkippedBaseline(state, previous, profile, ids) {
 async function settingsFile(ctx, s) {
   return safeFile(ctx.home, `plugin-settings/${s.plugin}/${s.document}.json`);
 }
+/**
+ * Normalizes raw settings file bytes into canonical validated JSON string.
+ *
+ * @param {{ plugin: string, document: string }} s
+ * @param {Buffer | null} raw
+ * @returns {string | null}
+ */
+function normalizeSettingsBytes(s, raw) {
+  if (raw === null) return null;
+  const doc = normalizeSettings(JSON.parse(raw.toString("utf8")));
+  return JSON.stringify(validateSettings(s.plugin, s.document, doc));
+}
+// The live presentation document may still carry legacy spellings its plugin
+// migrates at read; every read of it goes through the same normalization, and
+// capture stores that canonical form so all comparisons (planning, baseline,
+// backup drift, concurrency guards) agree on one representation.
+/**
+ * Reads and normalizes live settings for a managed settings descriptor.
+ *
+ * @param {object} ctx
+ * @param {{ plugin: string, document: string }} s
+ * @returns {Promise<string | null>}
+ */
+async function readLiveSettings(ctx, s) {
+  const raw = await bytesOrNull(await settingsFile(ctx, s));
+  return normalizeSettingsBytes(s, raw);
+}
+/**
+ * Normalizes a base64-encoded settings snapshot into its canonical base64 representation.
+ *
+ * @param {{ plugin: string, document: string }} s
+ * @param {string | null | undefined} rawBase64
+ * @returns {string | null}
+ */
+function normalizeSettingsSnapshot(s, rawBase64) {
+  if (rawBase64 === null || rawBase64 === undefined) return null;
+  const raw = Buffer.from(rawBase64, "base64");
+  const live = normalizeSettingsBytes(s, raw);
+  return live === null ? null : Buffer.from(live).toString("base64");
+}
+// Removing an installation deletes its settings directory, and the profile
+// only manages its allowlisted documents: every other settings file under
+// the plugin's directory is host-only data that a reinstall must capture
+// before removal and rewrite after installation.
+async function readHostOnlySettings(ctx, profile, plugin) {
+  const managed = new Set(
+    profile.settings
+      .filter((s) => s.plugin === plugin)
+      .map((s) => `${s.document}.json`),
+  );
+  const captured = {};
+  let names = [];
+  try {
+    names = await readdir(await safeFile(ctx.home, `plugin-settings/${plugin}`));
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
+  for (const name of names) {
+    if (managed.has(name) || !name.endsWith(".json")) continue;
+    const raw = await bytesOrNull(
+      await safeFile(ctx.home, `plugin-settings/${plugin}/${name}`),
+    );
+    if (raw !== null) captured[name] = raw.toString("base64");
+  }
+  return captured;
+}
+async function writeHostOnlySettings(ctx, plugin, captured) {
+  for (const [name, b64] of Object.entries(captured ?? {}))
+    await atomicWrite(
+      await safeFile(ctx.home, `plugin-settings/${plugin}/${name}`),
+      Buffer.from(b64, "base64"),
+    );
+}
+// An operation that died between its removal and the host-only rewrite
+// leaves the captured documents deleted on disk; recover exactly those,
+// never touching documents that exist now (later local edits, or defaults
+// recreated by a reinstall).
+async function recoverHostOnlySettings(ctx, plugin, captured, recreated = {}) {
+  for (const [name, b64] of Object.entries(captured ?? {})) {
+    const file = await safeFile(ctx.home, `plugin-settings/${plugin}/${name}`);
+    const raw = await bytesOrNull(file);
+    // Missing documents are recovered outright. Documents the incomplete
+    // installation recreated with defaults are recovered while their bytes
+    // still match what that installation wrote; anything else is a later
+    // local edit and stays untouched.
+    const installDefaults =
+      Object.hasOwn(recreated, name) &&
+      raw !== null &&
+      raw.toString("base64") === recreated[name];
+    if (raw === null || installDefaults)
+      await atomicWrite(file, Buffer.from(b64, "base64"));
+  }
+}
 async function installedFile(ctx, row, name) {
   if (!path.isAbsolute(row.path))
     throw new Error("Installed plugin path must be absolute");
@@ -203,6 +308,25 @@ async function resolvePluginDescriptor(
     row.installation?.identity?.kind === "directory" &&
     row.path
   ) {
+    // A bundle marker is the authoritative installation record: its revision
+    // names the archive the directory was built from, while repacking the
+    // installed directory would fold in build output (files a build command
+    // emits outside node_modules) and never match the profile revision again
+    // (Codex P1).
+    try {
+      const meta = await jsonOrNull(path.join(row.path, BUNDLE_MARKER));
+      if (
+        meta?.source?.startsWith("bundle:") &&
+        meta.revision &&
+        meta.source === target.source
+      )
+        return {
+          id: row.id,
+          source: meta.source,
+          revision: meta.revision,
+          enabled: row.enabled,
+        };
+    } catch {}
     try {
       const patchSpecs = (
         profile?.patches
@@ -324,14 +448,26 @@ export async function installOrUpdateBundlePlugin(
     `.${path.basename(destDir)}.stage-${randomUUID()}`,
   );
   try {
-    const unpacked = await unpackBundle(raw, stageDir);
+    await unpackBundle(raw, stageDir);
+    // Directory installs skip the daemon's own preparation, and bundles ship
+    // without node_modules, so type-only imports such as "@getpaseo/client"
+    // would find no declarations and fail compilation (the Windows restore
+    // error). Run the plugin's declared build commands on the staged copy —
+    // the same commands a git/npm install executes — before it replaces the
+    // destination.
+    await prepareBundleDirectory(stageDir);
+    // The baseline fingerprint must describe the prepared installation: a
+    // build may emit files outside node_modules, and drift detection compares
+    // the installed directory against this map (Codex P1). The revision keeps
+    // identifying the source archive.
+    const baseline = await fingerprintDirectory(stageDir);
     await writeFile(
       path.join(stageDir, BUNDLE_MARKER),
       JSON.stringify(
         {
           source: target.source,
           revision: target.revision,
-          files: unpacked.files,
+          files: baseline,
         },
         null,
         2,
@@ -401,7 +537,6 @@ async function capture(ctx, profile) {
       : null;
   }
   for (const s of profile.settings) {
-    const file = await settingsFile(ctx, s);
     if (
       skipMissingDisabled(
         ctx,
@@ -412,10 +547,9 @@ async function capture(ctx, profile) {
       settings[s.file] = null;
       continue;
     }
-    const raw = await bytesOrNull(file);
-    if (raw !== null)
-      validateSettings(s.plugin, s.document, JSON.parse(raw.toString("utf8")));
-    settings[s.file] = raw === null ? null : raw.toString("base64");
+    const live = await readLiveSettings(ctx, s);
+    settings[s.file] =
+      live === null ? null : Buffer.from(live).toString("base64");
   }
   for (const bundle of profile.patches) {
     const row = byId.get(bundle.plugin);
@@ -680,7 +814,12 @@ async function planData(ctx) {
       target,
       selfId,
     );
-    if (
+    // An exact registry version transition cannot be expressed as an in-place
+    // update (the daemon only offers approved registry upgrades). Under
+    // preferProfile it stays a disclosed skip; the explicit reinstall mode
+    // aligns it by removing and reinstalling the profile's pinned
+    // revision instead.
+    const registryTransition =
       blocked &&
       ctx.preferProfile &&
       now &&
@@ -689,8 +828,11 @@ async function planData(ctx) {
       now.source === target.source &&
       (now.pluginPath ?? ".") === (target.pluginPath ?? ".") &&
       target.id !== selfId &&
-      target.id !== "paseo-sync"
-    ) {
+      target.id !== "paseo-sync";
+    // Installing immediately enables code, so a target the profile wants
+    // disabled is never reinstalled (the missing-disabled guard blocks the
+    // same transition for absent plugins); it keeps the disclosed skip.
+    if (registryTransition && !(ctx.reinstallRegistry && target.enabled)) {
       skipped.push({
         plugin: target.id,
         reason: "registry-version-transition",
@@ -699,8 +841,13 @@ async function planData(ctx) {
       });
       continue;
     }
-    if (blocked) conflicts.push(blocked);
-    if (!sameVersion) actions.push(now ? "update" : "install");
+    // A registry transition handled as a reinstall is disclosed by its
+    // change entry, not as a blocking conflict.
+    if (blocked && !registryTransition) conflicts.push(blocked);
+    if (!sameVersion)
+      actions.push(
+        registryTransition ? "reinstall" : now ? "update" : "install",
+      );
     const bundle = profile.patches.find((x) => x.plugin === target.id);
     if (bundle) {
       let needsPatch = !sameVersion;
@@ -763,12 +910,14 @@ async function planData(ctx) {
     current: comparable(current),
     previous,
     preferProfile: !!ctx.preferProfile,
+    reinstallRegistry: !!ctx.reinstallRegistry,
   });
   const plan = {
     schemaVersion: 1,
     profileHash: profile.hash,
     approval,
     preferProfile: !!ctx.preferProfile,
+    reinstallRegistry: !!ctx.reinstallRegistry,
     changes,
     skipped,
     conflicts,
@@ -960,11 +1109,12 @@ export async function applyPlan(ctx, approval) {
       const affectedSettings = profile.settings.filter((s) => s.plugin === id),
         bundle = profile.patches.find((x) => x.plugin === id);
       if (before?.descriptor?.enabled) await ctx.adapter.act("disable", id);
-      // A client may have saved while disable was in flight. Compare exact bytes.
+      // A client may have saved while disable was in flight. Compare the
+      // canonical form both sides were captured in.
       for (const s of affectedSettings) {
-        const raw = await bytesOrNull(await settingsFile(ctx, s));
+        const live = await readLiveSettings(ctx, s);
         if (
-          (raw === null ? null : raw.toString("base64")) !==
+          (live === null ? null : Buffer.from(live).toString("base64")) !==
           current.settings[s.file]
         )
           throw new Error(`Settings changed concurrently while stopping ${id}`);
@@ -992,6 +1142,56 @@ export async function applyPlan(ctx, approval) {
           await ctx.adapter.update(target);
         }
       }
+      if (change.actions.includes("reinstall")) {
+        // The daemon cannot express an exact registry version transition as
+        // an update; align by removing and installing the pinned revision.
+        // Like the update path, edits that landed while the plugin was being
+        // disabled must abort before the destructive removal, and removing an
+        // installation deletes its settings directory, so host-only settings
+        // documents are captured into the backup first and rewritten after.
+        const latest = (await ctx.adapter.list()).find((p) => p.id === id);
+        if (
+          !latest ||
+          !same(await sourceState(latest, profile), before.sourceState ?? null)
+        )
+          throw new Error(`Local source changed while stopping ${id}`);
+        backup.hostOnlySettings = {
+          ...backup.hostOnlySettings,
+          [id]: await readHostOnlySettings(ctx, profile, id),
+        };
+        await writeJson(filename, backup);
+        await ctx.adapter.act("remove", id);
+        await ctx.adapter.install(target);
+        // The installation may recreate host-only documents with fresh
+        // defaults. Record their post-install bytes so a restore of this
+        // operation — if it fails before the rewrite below — can tell the
+        // daemon's defaults (bytes still matching) apart from local edits
+        // made after the failure, and recover the captured contents.
+        const capturedHostOnly = backup.hostOnlySettings?.[id];
+        if (capturedHostOnly) {
+          const recreated = {};
+          for (const name of Object.keys(capturedHostOnly)) {
+            const raw = await bytesOrNull(
+              await safeFile(ctx.home, `plugin-settings/${id}/${name}`),
+            );
+            if (
+              raw !== null &&
+              raw.toString("base64") !== capturedHostOnly[name]
+            )
+              recreated[name] = raw.toString("base64");
+          }
+          if (Object.keys(recreated).length) {
+            backup.hostOnlyRecreated = {
+              ...backup.hostOnlyRecreated,
+              [id]: recreated,
+            };
+            await writeJson(filename, backup);
+          }
+        }
+        const row = (await ctx.adapter.list()).find((x) => x.id === id);
+        if (!row) throw new Error(`Install returned no plugin: ${id}`);
+        if (row.enabled) await ctx.adapter.act("disable", id);
+      }
       const row = (await ctx.adapter.list()).find((x) => x.id === id);
       if (!row) throw new Error(`Missing plugin after install: ${id}`);
       const installed =
@@ -1016,19 +1216,37 @@ export async function applyPlan(ctx, approval) {
       }
       for (const s of affectedSettings) {
         const file = await settingsFile(ctx, s),
-          raw = await bytesOrNull(file);
-        // Installation may recreate defaults. Preserve the original check for same-version changes.
+          live = await readLiveSettings(ctx, s);
+        // Removal deletes and reinstalling may recreate settings files, so
+        // the canonical-form guard only covers in-place version changes.
         if (
-          (raw === null ? null : raw.toString("base64")) !==
-          current.settings[s.file]
+          !change.actions.includes("reinstall") &&
+          (live === null ? null : Buffer.from(live).toString("base64")) !==
+            current.settings[s.file]
         )
           throw new Error(
             `Settings changed concurrently before write: ${s.file}`,
           );
-        if (
-          !same(raw === null ? null : JSON.parse(raw.toString("utf8")), s.data)
-        )
+        if (live === null || !same(JSON.parse(live), s.data))
           await writeJson(file, s.data);
+      }
+      // Only a reinstall removed the settings directory; its host-only
+      // documents were freshly captured right before that removal. Once
+      // they are back on disk, drop the captured entry: later restores must
+      // not resurrect documents the user deleted afterwards.
+      if (change.actions.includes("reinstall")) {
+        await writeHostOnlySettings(ctx, id, backup.hostOnlySettings?.[id]);
+        if (backup.hostOnlySettings) {
+          delete backup.hostOnlySettings[id];
+          if (!Object.keys(backup.hostOnlySettings).length)
+            delete backup.hostOnlySettings;
+          if (backup.hostOnlyRecreated) {
+            delete backup.hostOnlyRecreated[id];
+            if (!Object.keys(backup.hostOnlyRecreated).length)
+              delete backup.hostOnlyRecreated;
+          }
+          await writeJson(filename, backup);
+        }
       }
       if (target.enabled) await ctx.adapter.act("enable", id);
     }
@@ -1086,6 +1304,7 @@ export async function restorePlan(ctx, id) {
       .every((p) => Object.hasOwn(p, "sourceState"));
   const conflicts = [],
     skipped = [];
+  const registryRollbacks = new Set();
   if (b.after === null || b.status === "pending" || b.status === "restoring")
     conflicts.push(
       "Interrupted backup has no verified final state; inspect daemon state before restoring.",
@@ -1128,12 +1347,29 @@ export async function restorePlan(ctx, id) {
       continue;
     }
     if (before) {
-      const conflict = transitionConflict(
-        now?.descriptor ?? null,
-        before.descriptor,
-        ctx.selfIds?.includes(plugin) ? plugin : ctx.selfId,
-      );
-      if (conflict) conflicts.push(conflict);
+      // An exact registry version transition cannot be expressed as an
+      // in-place update, so restoring the backed-up pinned revision
+      // removes and reinstalls it (mirroring the apply-side reinstall)
+      // instead of refusing the whole restore.
+      const nowDescriptor = now?.descriptor ?? null;
+      // Installing immediately enables code, so a backup whose pinned
+      // revision was disabled is never rolled back through a reinstall.
+      const registryRollback =
+        before.descriptor.enabled &&
+        nowDescriptor?.registry &&
+        nowDescriptor.revision !== before.descriptor.revision &&
+        nowDescriptor.source === before.descriptor.source &&
+        (nowDescriptor.pluginPath ?? ".") ===
+          (before.descriptor.pluginPath ?? ".");
+      if (registryRollback) registryRollbacks.add(plugin);
+      else {
+        const conflict = transitionConflict(
+          nowDescriptor,
+          before.descriptor,
+          ctx.selfIds?.includes(plugin) ? plugin : ctx.selfId,
+        );
+        if (conflict) conflicts.push(conflict);
+      }
       if (before.descriptor?.source?.startsWith("bundle:")) {
         const archive = await getBundleArchive(ctx, before.descriptor);
         if (!archive) {
@@ -1186,7 +1422,7 @@ export async function restorePlan(ctx, id) {
       .filter((p) => !skippedIds.has(p.id))
       .map((p) => ({
         plugin: p.id,
-        actions: ["restore"],
+        actions: [registryRollbacks.has(p.id) ? "reinstall" : "restore"],
         from: current.plugins[p.id]?.descriptor ?? null,
         to: b.before.plugins[p.id]?.descriptor ?? { ...p, enabled: false },
         settings: b.profile.settings
@@ -1248,9 +1484,9 @@ export async function restore(ctx, id, approval) {
     await writeJson(await backupFile(ctx, id), b);
     const assertCurrentSettings = async (plugin) => {
       for (const s of b.profile.settings.filter((x) => x.plugin === plugin)) {
-        const raw = await bytesOrNull(await settingsFile(ctx, s));
+        const live = await readLiveSettings(ctx, s);
         if (
-          (raw === null ? null : raw.toString("base64")) !==
+          (live === null ? null : Buffer.from(live).toString("base64")) !==
           preview._current.settings[s.file]
         )
           throw new Error(
@@ -1264,6 +1500,9 @@ export async function restore(ctx, id, approval) {
       await writeJson(await backupFile(ctx, id), b);
       const before = b.before.plugins[target.id];
       let row = (await ctx.adapter.list()).find((x) => x.id === target.id);
+      // An absent installation means whatever removed it also deleted its
+      // settings directory; captured host-only documents are the only copy.
+      const reinstallFromAbsent = !row;
       if (row?.enabled) await ctx.adapter.act("disable", target.id);
       if (
         row &&
@@ -1296,6 +1535,16 @@ export async function restore(ctx, id, approval) {
             ctx,
           )) ?? snapshotPlugin(row))
         : null;
+      // Registry rollback uses remove + install of the backed-up pinned
+      // revision, exactly like the apply-side reinstall mode.
+      const registryRollback =
+        before.descriptor.enabled &&
+        currentDescriptor?.registry &&
+        row &&
+        currentDescriptor.revision !== before.descriptor.revision &&
+        currentDescriptor.source === before.descriptor.source &&
+        (currentDescriptor.pluginPath ?? ".") ===
+          (before.descriptor.pluginPath ?? ".");
       if (
         !row ||
         !same(
@@ -1313,13 +1562,61 @@ export async function restore(ctx, id, approval) {
             !!row,
             row?.path,
           );
+        } else if (registryRollback) {
+          // Removing the installation deletes its settings directory;
+          // capture host-only documents first and rewrite them afterwards.
+          b.hostOnlySettings = {
+            ...b.hostOnlySettings,
+            [target.id]: await readHostOnlySettings(ctx, b.profile, target.id),
+          };
+          await writeJson(await backupFile(ctx, id), b);
+          await ctx.adapter.act("remove", target.id);
+          await ctx.adapter.install(before.descriptor);
         } else {
           if (row) await ctx.adapter.update(before.descriptor);
           else await ctx.adapter.install(before.descriptor);
         }
+        // A recovery installation may recreate captured host-only
+        // documents with fresh defaults. Record their post-install bytes —
+        // persisting before the fallible steps below — so a retry after a
+        // later failure can tell those defaults apart from local edits and
+        // still recover the captured contents (mirroring the apply-side
+        // marker).
+        if (registryRollback || reinstallFromAbsent) {
+          const capturedDocs = b.hostOnlySettings?.[target.id];
+          if (capturedDocs) {
+            const recreated = {};
+            for (const name of Object.keys(capturedDocs)) {
+              const raw = await bytesOrNull(
+                await safeFile(
+                  ctx.home,
+                  `plugin-settings/${target.id}/${name}`,
+                ),
+              );
+              if (
+                raw !== null &&
+                raw.toString("base64") !== capturedDocs[name]
+              )
+                recreated[name] = raw.toString("base64");
+            }
+            if (Object.keys(recreated).length) {
+              b.hostOnlyRecreated = {
+                ...b.hostOnlyRecreated,
+                [target.id]: recreated,
+              };
+              await writeJson(await backupFile(ctx, id), b);
+            }
+          }
+        }
         row = (await ctx.adapter.list()).find((x) => x.id === target.id);
         if (row?.enabled) await ctx.adapter.act("disable", target.id);
-        await assertCurrentSettings(target.id);
+        // A reinstall (registry rollback, or recovery from a failed one that
+        // removed the installation) legitimately recreates settings files
+        // with fresh defaults, so the byte-for-byte guard only covers
+        // in-place moves. The pre-install check above still guards the
+        // absent state.
+        if (!registryRollback && !reinstallFromAbsent)
+          await assertCurrentSettings(target.id);
       }
       for (const bundle of b.profile.patches.filter(
         (x) => x.plugin === target.id,
@@ -1335,12 +1632,36 @@ export async function restore(ctx, id, approval) {
       for (const s of b.profile.settings.filter(
         (x) => x.plugin === target.id,
       )) {
-        await assertCurrentSettings(target.id);
+        // After a registry rollback or a reinstall from absent the settings
+        // baseline was reset by a removal; the backup bytes are written
+        // unconditionally over any recreated defaults.
+        if (!registryRollback && !reinstallFromAbsent)
+          await assertCurrentSettings(target.id);
         const file = await settingsFile(ctx, s),
           raw = b.before.settings[s.file];
         if (raw === null) await rm(file, { force: true });
         else await atomicWrite(file, Buffer.from(raw, "base64"));
       }
+      // Host-only documents are rewritten only where the installation was
+      // actually removed: the registry rollback (freshly captured right
+      // before its removal) and a reinstall from absent, whose predecessor
+      // already deleted them, leaving the captured backup bytes as the only
+      // copy. An in-place restore never removed them; its pre-apply capture
+      // is stale and invisible to the drift guard, so only documents that
+      // an interrupted operation left missing are recovered.
+      if (registryRollback || reinstallFromAbsent)
+        await writeHostOnlySettings(
+          ctx,
+          target.id,
+          b.hostOnlySettings?.[target.id],
+        );
+      else
+        await recoverHostOnlySettings(
+          ctx,
+          target.id,
+          b.hostOnlySettings?.[target.id],
+          b.hostOnlyRecreated?.[target.id],
+        );
       if (before.descriptor.enabled) await ctx.adapter.act("enable", target.id);
     }
     const restored = await capture(ctx, b.profile);
@@ -1355,7 +1676,10 @@ export async function restore(ctx, id, approval) {
         )
           throw new Error(`Restore verification failed: ${p.id}`);
         for (const s of b.profile.settings.filter((x) => x.plugin === p.id))
-          if (restored.settings[s.file] !== b.before.settings[s.file])
+          if (
+            restored.settings[s.file] !==
+            normalizeSettingsSnapshot(s, b.before.settings[s.file])
+          )
             throw new Error(`Restore settings mismatch: ${s.file}`);
         for (const bundle of b.profile.patches.filter((x) => x.plugin === p.id))
           for (const f of bundle.data.files) {

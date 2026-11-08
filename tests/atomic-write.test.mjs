@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { atomicWrite } from "../server/core/files.mjs";
+import { atomicWrite, bytesOrNull } from "../server/core/files.mjs";
 test("Windows transient file sharing errors do not lose the final journal write", async (t) => {
   const base = await fs.mkdtemp(path.join(tmpdir(), "paseo-atomic-")),
     file = path.join(base, "job.json");
@@ -27,4 +27,90 @@ test("Windows transient file sharing errors do not lose the final journal write"
   }
   assert.equal(await fs.readFile(file, "utf8"), "new");
   assert.deepEqual(await fs.readdir(base), ["job.json"]);
+});
+test("Windows transient file sharing errors do not fail the owner.json read", async (t) => {
+  const base = await fs.mkdtemp(path.join(tmpdir(), "paseo-read-")),
+    file = path.join(base, "owner.json");
+  await fs.writeFile(file, '{"pid":1234}');
+  const readFile = fs.readFile,
+    platform = process.platform;
+  let count = 0;
+  const mock = t.mock.method(fs, "readFile", async (...args) => {
+    if (count++ < 2) {
+      const e = new Error("temporarily occupied");
+      e.code = "EPERM";
+      throw e;
+    }
+    return readFile(...args);
+  });
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    const data = await bytesOrNull(file);
+    assert.equal(data.toString("utf8"), '{"pid":1234}');
+    assert.equal(mock.mock.callCount(), 3);
+  } finally {
+    Object.defineProperty(process, "platform", { value: platform });
+  }
+});
+test("best-effort probes opt out of the Windows retry waits", async (t) => {
+  const base = await fs.mkdtemp(path.join(tmpdir(), "paseo-probe-")),
+    file = path.join(base, "paseo-plugin.json");
+  await fs.writeFile(file, "{}");
+  const platform = process.platform;
+  const mock = t.mock.method(fs, "readFile", async () => {
+    const e = new Error("inaccessible manifest");
+    e.code = "EACCES";
+    throw e;
+  });
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    await assert.rejects(
+      bytesOrNull(file, { retry: false }),
+      /inaccessible manifest/,
+    );
+  } finally {
+    Object.defineProperty(process, "platform", { value: platform });
+  }
+  assert.equal(mock.mock.callCount(), 1);
+});
+test("bytesOrNull gives up after five Windows retries and surfaces the error", async (t) => {
+  const base = await fs.mkdtemp(path.join(tmpdir(), "paseo-limit-")),
+    file = path.join(base, "owner.json");
+  await fs.writeFile(file, "{}");
+  const readFile = fs.readFile,
+    platform = process.platform;
+  let count = 0;
+  const mock = t.mock.method(fs, "readFile", async (...args) => {
+    if (count++ < 6) {
+      const e = new Error("still occupied");
+      e.code = "EPERM";
+      throw e;
+    }
+    return readFile(...args);
+  });
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    await assert.rejects(bytesOrNull(file), /still occupied/);
+  } finally {
+    Object.defineProperty(process, "platform", { value: platform });
+  }
+  assert.equal(mock.mock.callCount(), 6);
+});
+test("read errors propagate untouched outside Windows", async (t) => {
+  const base = await fs.mkdtemp(path.join(tmpdir(), "paseo-unix-")),
+    file = path.join(base, "owner.json");
+  await fs.writeFile(file, "{}");
+  const platform = process.platform;
+  const mock = t.mock.method(fs, "readFile", async () => {
+    const e = new Error("not permitted");
+    e.code = "EPERM";
+    throw e;
+  });
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  try {
+    await assert.rejects(bytesOrNull(file), /not permitted/);
+  } finally {
+    Object.defineProperty(process, "platform", { value: platform });
+  }
+  assert.equal(mock.mock.callCount(), 1);
 });

@@ -135,9 +135,34 @@ export function validateProfile(p) {
 }
 
 const choices = {
-  accent: ["host", "jade", "violet", "amber", "rose"],
+  accent: [
+    "host",
+    "jade",
+    "violet",
+    "amber",
+    "rose",
+    "zinc",
+    "midnight",
+    "claude",
+    "ghostty",
+    "pureBlack",
+  ],
   uiFont: ["host", "inter", "system"],
-  inlineCodeColor: ["grey", "blue", "violet", "green", "coral"],
+  inlineCodeColor: [
+    "grey",
+    "blue",
+    "violet",
+    "green",
+    "coral",
+    "jade",
+    "amber",
+    "rose",
+    "zinc",
+    "midnight",
+    "claude",
+    "ghostty",
+    "pureBlack",
+  ],
   monoFont: ["host", "custom"],
   toolDetail: ["collapsed", "expand-failed"],
   pathDisplay: ["relative", "absolute"],
@@ -159,6 +184,80 @@ const flags = [
   "blockDetails",
   "chatEnabled",
 ];
+// The live presentation document belongs to better-paseo, and that plugin
+// migrates two legacy spellings at read (shared/preferences-settings.ts):
+// rowLabels (an on/off switch before rowLabelStyle) and hoverDelay (fixed
+// steps before hoverDelaySeconds), and drops retired fields such as detailsTextZoom.
+// The daemon keeps the stored spelling until the plugin's next write, so a host
+// document can still carry them. Reads of the live document normalize through the
+// same rules — mirroring them here — while repository documents stay canonical:
+// export writes the normalized form, so a legacy spelling never enters the repository.
+const LEGACY_HOVER_DELAYS = {
+  "200ms": 0.2,
+  "500ms": 0.5,
+  "1s": 1,
+  "1.5s": 1.5,
+  "2s": 2,
+};
+/**
+ * Migrates legacy boolean rowLabels setting to rowLabelStyle if not already present.
+ *
+ * @param {Record<string, unknown>} values
+ * @returns {Record<string, unknown>}
+ */
+function migrateRowLabels(values) {
+  const { rowLabels, ...rest } = values;
+  if ("rowLabelStyle" in rest) return rest;
+  return rowLabels === true ? { ...rest, rowLabelStyle: "both" } : rest;
+}
+/**
+ * Migrates legacy string hoverDelay setting to numeric hoverDelaySeconds if not already present.
+ *
+ * @param {Record<string, unknown>} values
+ * @returns {Record<string, unknown>}
+ */
+function migrateHoverDelay(values) {
+  const { hoverDelay, ...rest } = values;
+  if ("hoverDelaySeconds" in rest) return rest;
+  const seconds =
+    typeof hoverDelay === "string" ? LEGACY_HOVER_DELAYS[hoverDelay] : undefined;
+  return seconds === undefined
+    ? rest
+    : { ...rest, hoverDelaySeconds: seconds };
+}
+/**
+ * Drops retired detailsTextZoom setting from older better-paseo versions.
+ *
+ * @param {Record<string, unknown>} values
+ * @returns {Record<string, unknown>}
+ */
+function migrateDetailsTextZoom(values) {
+  const { detailsTextZoom, ...rest } = values;
+  return rest;
+}
+/**
+ * Normalizes legacy better-paseo presentation settings values to canonical fields.
+ *
+ * @param {unknown} d
+ * @returns {unknown}
+ */
+export function normalizeSettings(d) {
+  if (!object(d) || !object(d.values)) return d;
+  return {
+    ...d,
+    values: migrateDetailsTextZoom(
+      migrateHoverDelay(migrateRowLabels(d.values)),
+    ),
+  };
+}
+/**
+ * Validates better-paseo presentation settings document structure, versions, allowed keys, and values.
+ *
+ * @param {string} plugin
+ * @param {string} document
+ * @param {any} d
+ * @returns {any}
+ */
 export function validateSettings(plugin, document, d) {
   check(
     plugin === "better-paseo" && document === "presentation",
@@ -178,7 +277,13 @@ export function validateSettings(plugin, document, d) {
     "detailsFontSize",
     "hoverDelaySeconds",
   ];
-  keys(d.values, allowed, []);
+  const unsupported = Object.keys(d.values).filter(
+    (k) => !allowed.includes(k),
+  );
+  check(
+    unsupported.length === 0,
+    `Unsupported presentation fields: ${unsupported.join(", ")}`,
+  );
   for (const [key, value] of Object.entries(d.values)) {
     if (choices[key])
       check(choices[key].includes(value), `Invalid setting ${key}`);

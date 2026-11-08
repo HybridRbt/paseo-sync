@@ -8,6 +8,7 @@ import {
   validateProfile,
   snapshotPlugin,
   validateSettings,
+  normalizeSettings,
 } from "../server/core/profile.mjs";
 import { safeFile } from "../server/core/files.mjs";
 
@@ -90,6 +91,136 @@ test("setting allowlist rejects credential-shaped and newly introduced fields", 
   }
   assert.throws(() =>
     validateSettings("linear", "credentials", { version: 1, values: {} }),
+  );
+});
+
+test("accepts the accent and inline code colors better-paseo publishes today", () => {
+  for (const accent of ["zinc", "midnight", "claude", "ghostty", "pureBlack"])
+    assert.doesNotThrow(() =>
+      validateSettings("better-paseo", "presentation", {
+        version: 1,
+        values: { accent },
+      }),
+    );
+  for (const inlineCodeColor of [
+    "jade",
+    "amber",
+    "rose",
+    "zinc",
+    "midnight",
+    "claude",
+    "ghostty",
+    "pureBlack",
+  ])
+    assert.doesNotThrow(() =>
+      validateSettings("better-paseo", "presentation", {
+        version: 1,
+        values: { inlineCodeColor },
+      }),
+    );
+});
+
+test("normalizes the legacy rowLabels and hoverDelay spellings the daemon keeps on disk", () => {
+  assert.deepEqual(
+    normalizeSettings({
+      version: 1,
+      values: { rowLabels: true, hoverDelay: "500ms", previewWrap: false },
+    }),
+    {
+      version: 1,
+      values: {
+        previewWrap: false,
+        rowLabelStyle: "both",
+        hoverDelaySeconds: 0.5,
+      },
+    },
+  );
+  // A modern key wins and its legacy spelling drops, exactly like the plugin's
+  // own read-time migration.
+  assert.deepEqual(
+    normalizeSettings({
+      version: 1,
+      values: {
+        rowLabels: true,
+        rowLabelStyle: "icon",
+        hoverDelay: "1s",
+        hoverDelaySeconds: 2,
+      },
+    }).values,
+    { rowLabelStyle: "icon", hoverDelaySeconds: 2 },
+  );
+  // Unmapped legacy delay spellings drop instead of being guessed.
+  assert.deepEqual(
+    normalizeSettings({ version: 1, values: { hoverDelay: "300ms" } }).values,
+    {},
+  );
+  const once = normalizeSettings({
+    version: 1,
+    values: { rowLabels: true, hoverDelay: "2s" },
+  });
+  assert.deepEqual(normalizeSettings(once), once);
+  // Retired detailsTextZoom from older better-paseo versions is dropped during normalization.
+  assert.deepEqual(
+    normalizeSettings({
+      version: 1,
+      values: { detailsTextZoom: 3, previewWrap: true },
+    }),
+    {
+      version: 1,
+      values: { previewWrap: true },
+    },
+  );
+  assert.deepEqual(
+    normalizeSettings({
+      version: 1,
+      values: { detailsTextZoom: 0, detailsFontSize: 16 },
+    }),
+    {
+      version: 1,
+      values: { detailsFontSize: 16 },
+    },
+  );
+  // Normalized document with retired detailsTextZoom validates cleanly.
+  assert.doesNotThrow(() =>
+    validateSettings(
+      "better-paseo",
+      "presentation",
+      normalizeSettings({
+        version: 1,
+        values: { detailsTextZoom: 2, previewWrap: true },
+      }),
+    ),
+  );
+  // Fields that are still unknown after normalization reject by name, while retired detailsTextZoom is omitted from the error.
+  assert.throws(
+    () =>
+      validateSettings(
+        "better-paseo",
+        "presentation",
+        normalizeSettings({
+          version: 1,
+          values: { detailsTextZoom: 2, token: "secret", rowClick: true },
+        }),
+      ),
+    /^Error: Unsupported presentation fields: token, rowClick$/,
+  );
+  // Fields that are still unknown after normalization reject by name.
+  assert.throws(
+    () =>
+      validateSettings("better-paseo", "presentation", {
+        version: 1,
+        values: { token: "secret", rowClick: true },
+      }),
+    /Unsupported presentation fields: token, rowClick/,
+  );
+  // An un-normalized document carrying detailsTextZoom is rejected by name.
+  assert.throws(
+    () =>
+      validateSettings("better-paseo", "presentation", {
+        version: 1,
+        values: { detailsTextZoom: 2 },
+      }),
+    /^Error: Unsupported presentation fields: detailsTextZoom$/,
   );
 });
 

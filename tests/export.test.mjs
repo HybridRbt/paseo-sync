@@ -62,6 +62,31 @@ test("export includes only portable sources and allowlisted settings, never cred
   );
   assert.ok(!setting.includes("private-"));
 });
+test("export canonicalizes legacy live spellings instead of failing or publishing them", async () => {
+  const ctx = await fixture();
+  await writeJson(
+    path.join(ctx.home, "plugin-settings/better-paseo/presentation.json"),
+    { version: 1, values: { previewWrap: true, rowLabels: true, hoverDelay: "1s", detailsTextZoom: 2 } },
+  );
+  const result = await exportProfile(ctx);
+  assert.equal(result.settings, 1);
+  const exported = JSON.parse(
+    await readFile(
+      path.join(ctx.root, "settings/better-paseo/presentation.json"),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(exported, {
+    version: 1,
+    values: { previewWrap: true, rowLabelStyle: "both", hoverDelaySeconds: 1 },
+  });
+  // The repository document reloads under the strict schema.
+  const { loadProfile } = await import("../server/core/profile.mjs");
+  assert.equal(
+    (await loadProfile(ctx.root)).settings[0].data.values.hoverDelaySeconds,
+    1,
+  );
+});
 test("export skips untracked plugin without portable identity instead of refusing", async () => {
   const ctx = await fixture();
   ctx.rows.push({ id: "mystery", enabled: true, path: "/tmp/unknown" });

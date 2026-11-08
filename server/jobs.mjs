@@ -45,6 +45,12 @@ export class JobManager {
   }
   async start(kind, task) {
     await this.initialize();
+    // The previous job releases its lock asynchronously after writing its
+    // final status; a caller that polls for that status may start the next
+    // operation before the release lands and misread the still-present lock
+    // as contention. Await our own previous job first — cross-process
+    // protection is unchanged (EEXIST still guards real concurrency).
+    if (this.running) await this.running.catch(() => {});
     const lock = await safeFile(this.state, "job.lock");
     try {
       await mkdir(lock);

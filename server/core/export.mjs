@@ -26,6 +26,7 @@ import {
   loadProfile,
   validatePatch,
   patchText,
+  normalizeSettings,
 } from "./profile.mjs";
 
 import { git } from "./git.mjs";
@@ -65,6 +66,12 @@ export async function assertRepositoryReady(root) {
       "Repository is behind or diverged from its upstream; reconcile Git before exporting.",
     );
 }
+/**
+ * Exports the live installation state, allowlisted settings, and patches into repository profile.
+ *
+ * @param {object} ctx
+ * @returns {Promise<{ manifest: object, settings: object[], patches: object[] }>}
+ */
 export async function exportProfile(ctx) {
   await assertRepositoryReady(ctx.root);
   if (ctx.state) await privateRoot(ctx.state);
@@ -163,8 +170,11 @@ export async function exportProfile(ctx) {
       } else {
         // Unbundled directory checkout without marker
         try {
+          // Best-effort probe of a foreign directory: skip the share-conflict
+          // retry so one inaccessible checkout cannot stall the export.
           const manifest = await jsonOrNull(
             await safeFile(row.path, "paseo-plugin.json"),
+            { retry: false },
           );
           if (!manifest) throw new Error("Missing paseo-plugin.json");
           const packed = await packPluginDirectory(row.path, {
@@ -274,12 +284,15 @@ export async function exportProfile(ctx) {
     const file = "settings/better-paseo/presentation.json";
     const data = await jsonOrNull(await safeFile(ctx.home, "plugin-" + file));
     if (data !== null) {
-      validateSettings("better-paseo", "presentation", data);
+      // The live document is normalized before export so the repository keeps
+      // only the current spelling; legacy spellings never enter it.
+      const doc = normalizeSettings(data);
+      validateSettings("better-paseo", "presentation", doc);
       settings.push({
         plugin: "better-paseo",
         document: "presentation",
         file,
-        data,
+        data: doc,
       });
     }
   }
