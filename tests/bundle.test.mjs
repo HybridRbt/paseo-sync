@@ -154,6 +154,35 @@ test("packPluginDirectory respects package.json files array when defined", async
   }
 });
 
+test("packPluginDirectory keeps lockfiles out of a files allowlist because restores rebuild with npm ci", async () => {
+  const src = await mkdtemp(path.join(tmpdir(), "bundle-pkg-lock-"));
+  const dst = await mkdtemp(path.join(tmpdir(), "bundle-pkg-lock-dst-"));
+  try {
+    await writeFile(
+      path.join(src, "package.json"),
+      // npm-publish semantics never ship a lockfile; a restore bundle must,
+      // or the plugin's own `npm ci` build command cannot run.
+      JSON.stringify({ name: "test-plugin", files: ["index.server.ts"] }),
+    );
+    await writeFile(
+      path.join(src, "paseo-plugin.json"),
+      JSON.stringify({ id: "test-plugin", build: [["npm", "ci", "--omit=dev"]] }),
+    );
+    await writeFile(path.join(src, "index.server.ts"), "export {};");
+    await writeFile(path.join(src, "package-lock.json"), '{"lockfileVersion":3}');
+    await writeFile(path.join(src, "npm-shrinkwrap.json"), '{"lockfileVersion":3}');
+
+    const packed = await packPluginDirectory(src);
+    assert.equal(packed.files["package-lock.json"] !== undefined, true);
+    assert.equal(packed.files["npm-shrinkwrap.json"] !== undefined, true);
+    await unpackBundle(packed.buffer, dst);
+    assert.equal(await readFile(path.join(dst, "package-lock.json"), "utf8"), '{"lockfileVersion":3}');
+  } finally {
+    await rm(src, { recursive: true, force: true });
+    await rm(dst, { recursive: true, force: true });
+  }
+});
+
 test("matchPattern and packPluginDirectory preserve globstar recursive wildcard semantics", async () => {
   const { matchPattern } = await import("../server/core/bundle.mjs");
   assert.equal(matchPattern("index.js", "**/*.js"), true);

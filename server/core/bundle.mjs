@@ -611,6 +611,11 @@ function evaluatePkgFileMatch(relPath, patterns) {
     !normalized.includes("/") &&
     (base === "package.json" ||
       base === "paseo-plugin.json" ||
+      // A bundle is a source snapshot rebuilt on the restore host, not an npm
+      // tarball: lockfiles are build inputs ("npm ci" refuses to run without
+      // one), so an npm-publish "files" allowlist must not drop them.
+      base === "package-lock.json" ||
+      base === "npm-shrinkwrap.json" ||
       /^README(\..+)?$/i.test(base) ||
       /^LICENSE(\..+)?$/i.test(base) ||
       /^LICENCE(\..+)?$/i.test(base))
