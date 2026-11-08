@@ -331,7 +331,7 @@ export function validatePatch(d, plugin) {
       d.revision === plugin.revision &&
       Array.isArray(d.files) &&
       d.files.length > 0,
-    "Patch does not match plugin revision",
+    `Patch does not match plugin revision: patch ${JSON.stringify(d.plugin)}@${JSON.stringify(d.revision)} vs plugin ${JSON.stringify(plugin?.id)}@${JSON.stringify(plugin?.revision)}`,
   );
   const seen = new Set();
   for (const f of d.files) {

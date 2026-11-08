@@ -1142,6 +1142,7 @@ export function ResultSummary({
       files?: string[];
       head?: string;
       revision?: string;
+      patchRevision?: string;
       published?: boolean;
       // Present only on apply-side skips: the local checkout left untouched.
       checkout?: string;
@@ -1409,6 +1410,24 @@ export function ResultSummary({
                 "如需完全对齐 {plugin}，可点按「卸载重装注册表插件对齐（重新预览）」，用云端固定版本卸载并重装该插件。",
                 { plugin: s.plugin },
               )}
+            </Text>
+          </View>
+        ) : s.reason === "patch-revision-mismatch" ? (
+          <View key={s.plugin} style={{ gap: 4 }}>
+            <Text selectable style={text}>
+              {t(
+                "跳过 {plugin}：本机版本与云端源码补丁绑定的版本不一致（本机 {revision}，补丁 {patchRevision}），本次不发布它的变更。",
+                {
+                  plugin: s.plugin,
+                  revision: s.revision,
+                  patchRevision: s.patchRevision,
+                },
+              )}
+            </Text>
+            <Text selectable style={text}>
+              {s.published
+                ? t("配置仓库沿用该插件已发布的版本。")
+                : t("该插件尚未发布过，本次不出现在配置中。")}
             </Text>
           </View>
         ) : (

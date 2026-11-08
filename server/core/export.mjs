@@ -337,12 +337,37 @@ export async function exportProfile(ctx) {
       patches.push(entry);
       continue;
     }
-    const target = plugins.find((p) => p.id === entry.plugin);
-    if (!target) continue;
-    const data = validatePatch(
-      JSON.parse(await readFile(await safeFile(ctx.root, entry.file), "utf8")),
-      target,
+    const index = plugins.findIndex((p) => p.id === entry.plugin);
+    if (index === -1) continue;
+    const target = plugins[index];
+    const doc = JSON.parse(
+      await readFile(await safeFile(ctx.root, entry.file), "utf8"),
     );
+    // A recorded patch is bound to one plugin revision. A host that installed
+    // a different revision cannot publish its snapshot together with that
+    // patch: instead of blocking the whole export, the plugin is skipped and
+    // disclosed, and the repository keeps the published entry and patch.
+    if (doc?.plugin !== target.id || doc?.revision !== target.revision) {
+      const remote = loaded?.manifest.plugins.find(
+        (p) => p.id === entry.plugin,
+      );
+      if (remote) plugins[index] = remote;
+      else plugins.splice(index, 1);
+      bundled.delete(entry.plugin);
+      const skip = {
+        plugin: entry.plugin,
+        reason: "patch-revision-mismatch",
+        revision: target.revision,
+        patchRevision: typeof doc?.revision === "string" ? doc.revision : null,
+      };
+      if (remote) {
+        skip.published = true;
+        patches.push(entry);
+      }
+      skipped.push(skip);
+      continue;
+    }
+    const data = validatePatch(doc, target);
     const row = rows.find((r) => r.id === entry.plugin);
     for (const f of data.files) {
       const raw = await readFile(await safeFile(row.path, f.path));

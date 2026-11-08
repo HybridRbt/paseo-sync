@@ -267,6 +267,89 @@ test("publish preview discloses skipped untracked plugins instead of failing", a
   assert.ok(!manifest.plugins.some((x) => x.id === "flowly"));
   assert.ok(manifest.plugins.some((x) => x.id === "demo"));
 });
+test("publish preview discloses a patch revision mismatch instead of failing before the preview", async () => {
+  const f = await fixture();
+  // A repository already published from another host: the profile pins
+  // github-board 0.10.2 together with a recorded source patch for it.
+  await mkdir(path.join(f.root, "patches"), { recursive: true });
+  await writeFile(
+    path.join(f.root, "patches/github-board-0.10.2-icons.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      plugin: "github-board",
+      revision: "0.10.2",
+      files: [
+        {
+          path: "index.js",
+          beforeSha256: "a".repeat(64),
+          afterSha256: "b".repeat(64),
+          find: "icons: false",
+          replace: "icons: true",
+          count: 1,
+        },
+      ],
+    }),
+  );
+  await writeJson(path.join(f.root, "profile.json"), {
+    schemaVersion: 1,
+    plugins: [
+      {
+        id: "demo",
+        source: "npm:demo",
+        revision: "1.0.0",
+        enabled: true,
+      },
+      {
+        id: "github-board",
+        source: "npm:@gpambrozio/paseo-github-board",
+        revision: "0.10.2",
+        enabled: true,
+      },
+    ],
+    settings: [],
+    patches: [
+      { plugin: "github-board", file: "patches/github-board-0.10.2-icons.json" },
+    ],
+  });
+  f.git("add", ".");
+  f.git("commit", "-qm", "profile with patch");
+  // This host installed a different github-board revision than the patch
+  // targets; the preview must still render and disclose the skip.
+  f.rows.push({
+    id: "github-board",
+    enabled: true,
+    status: "running",
+    path: path.join(f.home, "plugins", "github-board"),
+    installation: {
+      identity: { kind: "npm", packageName: "@gpambrozio/paseo-github-board" },
+      currentRevision: "0.11.0",
+    },
+  });
+  const p = await repository.publishPlan(f);
+  assert.deepEqual(p.skipped, [
+    {
+      plugin: "github-board",
+      reason: "patch-revision-mismatch",
+      revision: "0.11.0",
+      patchRevision: "0.10.2",
+      published: true,
+    },
+  ]);
+  assert.equal(p.files.length, 0);
+  await repository.publish(f, p.approval, { push: false });
+  const manifest = JSON.parse(
+    await readFile(path.join(f.root, "profile.json"), "utf8"),
+  );
+  assert.equal(
+    manifest.plugins.find((x) => x.id === "github-board").revision,
+    "0.10.2",
+  );
+  assert.equal(manifest.patches.length, 1);
+  // A later publish from the same host still previews: the divergence is
+  // disclosed as a conflict with the force-overwrite choice, never a crash.
+  const again = await repository.publishPlan(f);
+  assert.equal(again.skipped[0]?.reason, "patch-revision-mismatch");
+});
 test("publish preview packages a valid directory plugin into a bundle without tripping captureBaseline guard", async () => {
   const f = await fixture();
   const dir = path.join(f.home, "flowly-checkout");
