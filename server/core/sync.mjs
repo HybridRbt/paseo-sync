@@ -274,6 +274,17 @@ export async function installOrUpdateBundlePlugin(
         `Cannot overwrite unmarked plugin directory with bundle: ${target.id} (${existingPath})`,
       );
     }
+  } else if (await symlinkedRoot(destDir)) {
+    // The install branch always derives the default destination, and both of
+    // its guards follow links: a junction at the plugin root lets the marker
+    // check read through it while the backup/replace renames below move the
+    // link itself — consuming the alias and republishing the bundle as a
+    // separate copy while the real installation stays stale. The install-branch
+    // twin of the update refusal above: lstat also catches dangling links,
+    // which the existsSync-based unmarked and backup checks never see.
+    throw new Error(
+      `Cannot install a plugin directory whose root is a symlink: ${target.id} (${destDir})`,
+    );
   } else if (existsSync(destDir) && !(await hasBundleMarker(destDir))) {
     throw new Error(
       `Cannot overwrite unmarked plugin directory with bundle: ${target.id} (${destDir})`,
