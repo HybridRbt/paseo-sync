@@ -89,7 +89,9 @@ export async function bytesOrNull(file, { retry = true } = {}) {
 }
 export async function jsonOrNull(file, opts) {
   const data = await bytesOrNull(file, opts);
-  return data === null ? null : JSON.parse(data.toString("utf8"));
+  if (data === null) return null;
+  const text = data.toString("utf8").replace(/^\uFEFF/, "");
+  return JSON.parse(text);
 }
 export async function atomicWrite(file, data) {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { jsonOrNull } from "./files.mjs";
 
 const OUTPUT_LIMIT = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -56,14 +56,44 @@ function spawnSpec(command, platform) {
   };
 }
 
+export const RUNTIME_CONTROL_ENV_KEYS = [
+  "PASEO_NODE_ENV",
+  "PASEO_DESKTOP_MANAGED",
+  "PASEO_SUPERVISED",
+  "ELECTRON_RUN_AS_NODE",
+  "ELECTRON_NO_ATTACH_CONSOLE",
+  "ESBUILD_BINARY_PATH",
+];
+
+export function sanitizeBuildEnv(baseEnv = process.env) {
+  const sanitized = { ...baseEnv };
+  const upperKeysToRemove = new Set(
+    RUNTIME_CONTROL_ENV_KEYS.map((k) => k.toUpperCase()),
+  );
+  for (const key of Object.keys(sanitized)) {
+    if (upperKeysToRemove.has(key.toUpperCase())) {
+      delete sanitized[key];
+    }
+  }
+  for (const [key, value] of Object.entries(sanitized)) {
+    if (value === undefined) {
+      delete sanitized[key];
+    }
+  }
+  return sanitized;
+}
+
 export async function readBuildCommands(directory) {
   // A missing or unparseable manifest is the daemon's error to report on
   // install; preparation only claims the `build` field when it is present.
+  // Transient Windows file locks (EPERM/EBUSY/EACCES) right after unpacking
+  // are retried via jsonOrNull and windowsRetry; genuine I/O errors propagate.
   let manifest;
   try {
-    manifest = JSON.parse(await readFile(path.join(directory, "paseo-plugin.json"), "utf8"));
-  } catch {
-    return [];
+    manifest = await jsonOrNull(path.join(directory, "paseo-plugin.json"));
+  } catch (err) {
+    if (err instanceof SyntaxError) return [];
+    throw err;
   }
   const build = manifest?.build;
   if (build === undefined || build === null) return [];
@@ -142,7 +172,7 @@ function runCommand(directory, command, options) {
     try {
       child = options.spawnFn(spec.command, spec.args, {
         cwd: directory,
-        env: options.env ?? process.env,
+        env: sanitizeBuildEnv(options.env ?? process.env),
         shell: spec.shell,
         windowsHide: true,
         detached: !isWindows,

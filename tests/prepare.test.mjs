@@ -11,6 +11,8 @@ import {
   readBuildCommands,
   runPluginBuildCommands,
   prepareBundleDirectory,
+  sanitizeBuildEnv,
+  RUNTIME_CONTROL_ENV_KEYS,
 } from "../server/core/prepare.mjs";
 
 function fakeChild({ exitCode = 0, stdout = "", stderr = "" } = {}) {
@@ -67,7 +69,7 @@ test("runPluginBuildCommands spawns each command in the plugin directory", async
   assert.deepEqual(calls[0].args, ["ci", "--omit=dev"]);
   assert.equal(calls[0].options.cwd, "/tmp/plugin");
   assert.equal(calls[0].options.shell, false);
-  assert.equal(calls[0].options.env, process.env);
+  assert.deepEqual(calls[0].options.env, sanitizeBuildEnv(process.env));
 });
 
 test("runPluginBuildCommands quotes command and args for the cmd shell on Windows", async (t) => {
@@ -211,4 +213,90 @@ test("a timed-out build rejects even when the launcher already exited zero", asy
     }),
     /failed \(timed out\)/,
   );
+});
+
+test("sanitizeBuildEnv strips runtime control variables like ELECTRON_RUN_AS_NODE and ESBUILD_BINARY_PATH case-insensitively", () => {
+  const dirtyEnv = {
+    PATH: "/bin:/usr/bin",
+    ELECTRON_RUN_AS_NODE: "1",
+    electron_no_attach_console: "1",
+    PASEO_NODE_ENV: "production",
+    Paseo_Desktop_Managed: "1",
+    paseo_supervised: "1",
+    ESBUILD_BINARY_PATH: "/opt/esbuild",
+    CUSTOM_VAR: "custom_val",
+  };
+  const cleaned = sanitizeBuildEnv(dirtyEnv);
+  assert.equal(cleaned.CUSTOM_VAR, "custom_val");
+  assert.equal(cleaned.PATH, "/bin:/usr/bin");
+  assert.equal(cleaned.ELECTRON_RUN_AS_NODE, undefined);
+  assert.equal(cleaned.electron_no_attach_console, undefined);
+  assert.equal(cleaned.PASEO_NODE_ENV, undefined);
+  assert.equal(cleaned.Paseo_Desktop_Managed, undefined);
+  assert.equal(cleaned.paseo_supervised, undefined);
+  assert.equal(cleaned.ESBUILD_BINARY_PATH, undefined);
+});
+
+test("readBuildCommands parses manifests with UTF-8 BOM", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "prepare-bom-"));
+  await writeFile(
+    path.join(dir, "paseo-plugin.json"),
+    "\uFEFF" + JSON.stringify({ id: "bom-plugin", build: [["npm", "ci"]] }),
+    "utf8",
+  );
+  assert.deepEqual(await readBuildCommands(dir), [["npm", "ci"]]);
+});
+
+test("readBuildCommands retries on transient Windows file lock errors and succeeds", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "prepare-retry-"));
+  const manifestPath = path.join(dir, "paseo-plugin.json");
+  await writeFile(
+    manifestPath,
+    JSON.stringify({ id: "retry-plugin", build: [["npm", "ci"]] }),
+  );
+  const fs = await import("node:fs/promises");
+  const originalReadFile = fs.default.readFile;
+  const platform = process.platform;
+  let attempts = 0;
+  t.mock.method(fs.default, "readFile", async (...args) => {
+    if (args[0] === manifestPath && attempts++ < 2) {
+      const err = new Error("Resource temporarily locked by antivirus");
+      err.code = "EPERM";
+      throw err;
+    }
+    return originalReadFile(...args);
+  });
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    const commands = await readBuildCommands(dir);
+    assert.deepEqual(commands, [["npm", "ci"]]);
+    assert.equal(attempts, 3);
+  } finally {
+    Object.defineProperty(process, "platform", { value: platform });
+  }
+});
+
+test("readBuildCommands surfaces persistent non-SyntaxError file read errors", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "prepare-fail-"));
+  const manifestPath = path.join(dir, "paseo-plugin.json");
+  await writeFile(
+    manifestPath,
+    JSON.stringify({ id: "fail-plugin", build: [["npm", "ci"]] }),
+  );
+  const fs = await import("node:fs/promises");
+  const platform = process.platform;
+  t.mock.method(fs.default, "readFile", async (...args) => {
+    if (args[0] === manifestPath) {
+      const err = new Error("Hard disk corrupted");
+      err.code = "EIO";
+      throw err;
+    }
+    return fs.default.readFile(...args);
+  });
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    await assert.rejects(readBuildCommands(dir), /Hard disk corrupted/);
+  } finally {
+    Object.defineProperty(process, "platform", { value: platform });
+  }
 });
