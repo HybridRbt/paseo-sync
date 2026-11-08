@@ -98,10 +98,13 @@ export class JobManager {
         if (e.backupId) j.backupId = e.backupId;
       } finally {
         j.finishedAt = new Date().toISOString();
+        // Release the lock before persisting the terminal state: pollers act on
+        // the terminal status and immediately start() the next job, so a
+        // finished job must never be observable while its lock still exists.
         try {
-          await writeJson(await this.file(id), j);
-        } finally {
           await rm(lock, { recursive: true, force: true });
+        } finally {
+          await writeJson(await this.file(id), j);
         }
       }
     })();
