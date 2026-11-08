@@ -3034,7 +3034,12 @@ test("bundle update refuses a plugin root that is itself a symlink", async () =>
     const { installOrUpdateBundlePlugin } = await import(
       "../server/core/sync.mjs"
     );
-    const ctx = { home, root, state, adapter: { async reload() {} } };
+    const ctx = {
+      home,
+      root,
+      state,
+      adapter: { async install() {}, async reload() {} },
+    };
     await assert.rejects(
       installOrUpdateBundlePlugin(
         ctx,
@@ -3055,6 +3060,156 @@ test("bundle update refuses a plugin root that is itself a symlink", async () =>
       await readFile(path.join(plugin, "index.js"), "utf8"),
       "version 1;",
     );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("bundle install refuses a default local-plugins destination that is itself a symlink", async () => {
+  // The install branch always derives destDir = home/local-plugins/<id>, and
+  // both of its guards follow links: existsSync and the bundle-marker check
+  // read through a junction planted at that root, so an alias of a marked
+  // installation sails past them into the backup/replace renames — which move
+  // the link itself, consume the alias and republish the bundle as a separate
+  // copy while the real installation stays stale (the install-branch twin of
+  // the update hazard in the test above). The root-symlink refusal comes
+  // before the unmarked check, so the error names the link instead of
+  // mislabeling the directory it points at.
+  const base = await realpath(
+    await mkdtemp(path.join(tmpdir(), "paseo-symlink-install-")),
+  );
+  const home = path.join(base, "home");
+  const root = path.join(base, "repo");
+  const state = path.join(base, "state");
+  try {
+    await mkdir(path.join(home, "local-plugins"), { recursive: true });
+    await mkdir(root, { recursive: true });
+    await mkdir(state, { recursive: true });
+    // The real installation lives at a canonical spelling away from the
+    // default destination; the junction makes local-plugins/<id> its alias.
+    const canonical = path.join(base, "canonical", "better-paseo");
+    await mkdir(canonical, { recursive: true });
+    await writeFile(path.join(canonical, "index.js"), "version 1;", "utf8");
+    await writeFile(
+      path.join(canonical, BUNDLE_MARKER),
+      JSON.stringify({
+        source: "bundle:bundles/better-paseo.tar.gz",
+        revision: "r1",
+      }),
+      "utf8",
+    );
+    const destDir = path.join(home, "local-plugins", "better-paseo");
+    await symlink(canonical, destDir, "junction");
+
+    const sourceDir = path.join(base, "src");
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      path.join(sourceDir, "paseo-plugin.json"),
+      JSON.stringify({ id: "better-paseo", name: "Better Paseo" }),
+      "utf8",
+    );
+    await writeFile(path.join(sourceDir, "index.js"), "version 2;");
+    const packedV2 = await packPluginDirectory(sourceDir);
+    await mkdir(path.join(root, "bundles"), { recursive: true });
+    await writeFile(
+      path.join(root, "bundles/better-paseo.tar.gz"),
+      packedV2.buffer,
+    );
+
+    const { installOrUpdateBundlePlugin } = await import(
+      "../server/core/sync.mjs"
+    );
+    const ctx = {
+      home,
+      root,
+      state,
+      adapter: { async install() {}, async reload() {} },
+    };
+    await assert.rejects(
+      installOrUpdateBundlePlugin(
+        ctx,
+        {
+          id: "better-paseo",
+          source: "bundle:bundles/better-paseo.tar.gz",
+          revision: packedV2.sha256,
+        },
+        false,
+      ),
+      /root is a symlink/,
+    );
+    // The refusal leaves both spellings untouched: the alias still resolves
+    // to the previous revision instead of being replaced by a staged copy.
+    assert.equal((await lstat(destDir)).isSymbolicLink(), true);
+    assert.equal(
+      await readFile(path.join(canonical, "index.js"), "utf8"),
+      "version 1;",
+    );
+    assert.equal(
+      await readFile(path.join(destDir, "index.js"), "utf8"),
+      "version 1;",
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("bundle install refuses a dangling symlink destination instead of replacing it", async () => {
+  // existsSync follows links, so a dangling junction at the default
+  // destination skips both the unmarked check and the backup rename and lands
+  // in the replace rename, where the platform either errors (macOS reports a
+  // raw ENOTDIR renaming a directory onto a link entry) or replaces the alias
+  // — never diagnosing the link. lstat sees the link itself and refuses it
+  // like any other root symlink.
+  const base = await realpath(
+    await mkdtemp(path.join(tmpdir(), "paseo-symlink-dangling-")),
+  );
+  const home = path.join(base, "home");
+  const root = path.join(base, "repo");
+  const state = path.join(base, "state");
+  try {
+    await mkdir(path.join(home, "local-plugins"), { recursive: true });
+    await mkdir(root, { recursive: true });
+    await mkdir(state, { recursive: true });
+    const destDir = path.join(home, "local-plugins", "better-paseo");
+    await symlink(path.join(base, "gone"), destDir, "junction");
+
+    const sourceDir = path.join(base, "src");
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      path.join(sourceDir, "paseo-plugin.json"),
+      JSON.stringify({ id: "better-paseo", name: "Better Paseo" }),
+      "utf8",
+    );
+    await writeFile(path.join(sourceDir, "index.js"), "version 2;");
+    const packedV2 = await packPluginDirectory(sourceDir);
+    await mkdir(path.join(root, "bundles"), { recursive: true });
+    await writeFile(
+      path.join(root, "bundles/better-paseo.tar.gz"),
+      packedV2.buffer,
+    );
+
+    const { installOrUpdateBundlePlugin } = await import(
+      "../server/core/sync.mjs"
+    );
+    const ctx = {
+      home,
+      root,
+      state,
+      adapter: { async install() {}, async reload() {} },
+    };
+    await assert.rejects(
+      installOrUpdateBundlePlugin(
+        ctx,
+        {
+          id: "better-paseo",
+          source: "bundle:bundles/better-paseo.tar.gz",
+          revision: packedV2.sha256,
+        },
+        false,
+      ),
+      /root is a symlink/,
+    );
+    assert.equal((await lstat(destDir)).isSymbolicLink(), true);
   } finally {
     await rm(base, { recursive: true, force: true });
   }
