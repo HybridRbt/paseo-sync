@@ -27,6 +27,7 @@ import {
   unpackBundle,
   packPluginDirectory,
   attachPatchOriginalBytes,
+  fingerprintDirectory,
   BUNDLE_MARKER,
   resolveBundleArchive,
 } from "./bundle.mjs";
@@ -204,6 +205,25 @@ async function resolvePluginDescriptor(
     row.installation?.identity?.kind === "directory" &&
     row.path
   ) {
+    // A bundle marker is the authoritative installation record: its revision
+    // names the archive the directory was built from, while repacking the
+    // installed directory would fold in build output (files a build command
+    // emits outside node_modules) and never match the profile revision again
+    // (Codex P1).
+    try {
+      const meta = await jsonOrNull(path.join(row.path, BUNDLE_MARKER));
+      if (
+        meta?.source?.startsWith("bundle:") &&
+        meta.revision &&
+        meta.source === target.source
+      )
+        return {
+          id: row.id,
+          source: meta.source,
+          revision: meta.revision,
+          enabled: row.enabled,
+        };
+    } catch {}
     try {
       const patchSpecs = (
         profile?.patches
@@ -314,20 +334,7 @@ export async function installOrUpdateBundlePlugin(
     `.${path.basename(destDir)}.stage-${randomUUID()}`,
   );
   try {
-    const unpacked = await unpackBundle(raw, stageDir);
-    await writeFile(
-      path.join(stageDir, BUNDLE_MARKER),
-      JSON.stringify(
-        {
-          source: target.source,
-          revision: target.revision,
-          files: unpacked.files,
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
+    await unpackBundle(raw, stageDir);
     // Directory installs skip the daemon's own preparation, and bundles ship
     // without node_modules, so type-only imports such as "@getpaseo/client"
     // would find no declarations and fail compilation (the Windows restore
@@ -335,6 +342,24 @@ export async function installOrUpdateBundlePlugin(
     // the same commands a git/npm install executes — before it replaces the
     // destination.
     await prepareBundleDirectory(stageDir);
+    // The baseline fingerprint must describe the prepared installation: a
+    // build may emit files outside node_modules, and drift detection compares
+    // the installed directory against this map (Codex P1). The revision keeps
+    // identifying the source archive.
+    const baseline = await fingerprintDirectory(stageDir);
+    await writeFile(
+      path.join(stageDir, BUNDLE_MARKER),
+      JSON.stringify(
+        {
+          source: target.source,
+          revision: target.revision,
+          files: baseline,
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
   } catch (err) {
     await rm(stageDir, { recursive: true, force: true });
     throw err;

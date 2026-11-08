@@ -2388,6 +2388,25 @@ test("bundle installs run the manifest build commands on the staged copy before 
       await readFile(path.join(destDir, "prepared-by-build.txt"), "utf8"),
       "ok",
     );
+    // The marker baseline must describe the prepared directory, not the raw
+    // archive: build output outside node_modules is installation state, so
+    // drift detection reports the plugin clean (Codex P1).
+    const marker = JSON.parse(
+      await readFile(path.join(destDir, BUNDLE_MARKER), "utf8"),
+    );
+    assert.ok(marker.files["prepared-by-build.txt"], "baseline includes build output");
+    assert.equal(marker.revision, packed.sha256);
+    const { sourceState } = await import("../server/core/source-state.mjs");
+    const sourceStateResult = await sourceState(
+      {
+        id: "flowly",
+        path: destDir,
+        installation: { identity: { kind: "directory", path: destDir } },
+      },
+      null,
+    );
+    assert.deepEqual(sourceStateResult.changed, []);
+    assert.equal(sourceStateResult.clean, true);
     const leftovers = (await readdir(path.join(home, "local-plugins"))).filter((name) =>
       name.includes(".stage-"),
     );

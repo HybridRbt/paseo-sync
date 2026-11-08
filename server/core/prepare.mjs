@@ -4,6 +4,12 @@ import path from "node:path";
 
 const OUTPUT_LIMIT = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+const FORCE_SETTLE_MS = 5000;
+// A bundle follows npm-publish "files" allowlist semantics, which drop build
+// inputs the manifest's own build commands need; point the author at the fix
+// instead of leaving a bare MODULE_NOT_FOUND.
+const BUILD_FAILURE_HINT =
+  "\nIf the bundle lacks files the build command needs (an npm \"files\" allowlist does not ship build scripts), add them to the allowlist in the source plugin.";
 
 export function isWindowsCommandScript(command, platform = process.platform) {
   const extension = path.extname(command).toLowerCase();
@@ -85,13 +91,52 @@ function formatOutput(result) {
   return output ? `\n${output}` : "";
 }
 
+function killProcessTree(child, platform) {
+  if (child.pid === undefined) {
+    child.kill("SIGKILL");
+    return;
+  }
+  if (platform === "win32") {
+    // taskkill /T reaches descendants behind cmd.exe launchers; a failure
+    // falls back to killing the immediate child only.
+    const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+      windowsHide: true,
+    });
+    killer.once("error", () => {
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+    });
+    return;
+  }
+  // The child was spawned detached, so it leads its own process group and the
+  // negative pid signals every descendant at once.
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    try {
+      child.kill("SIGKILL");
+    } catch {}
+  }
+}
+
 function runCommand(directory, command, options) {
   return new Promise((resolve) => {
     const spec = spawnSpec(command, options.platform);
+    const isWindows = options.platform === "win32";
     let stdout = "",
       stderr = "",
-      spawnError = null,
-      settled = false;
+      spawnError = null;
+    let settled = false;
+    let timeoutTimer = null,
+      forceTimer = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (forceTimer) clearTimeout(forceTimer);
+      resolve(result);
+    };
     let child;
     try {
       child = options.spawnFn(spec.command, spec.args, {
@@ -99,19 +144,26 @@ function runCommand(directory, command, options) {
         env: options.env ?? process.env,
         shell: spec.shell,
         windowsHide: true,
+        detached: !isWindows,
       });
     } catch (err) {
-      resolve({ exitCode: null, stdout, stderr, error: err });
+      finish({ exitCode: null, stdout, stderr, error: err });
       return;
     }
-    const timer = options.timeoutMs
-      ? setTimeout(() => {
-          if (!settled && child.pid !== undefined) {
-            stderr += `\nBuild command timed out after ${options.timeoutMs}ms`;
-            child.kill();
-          }
-        }, options.timeoutMs)
-      : null;
+    if (options.timeoutMs) {
+      timeoutTimer = setTimeout(() => {
+        if (settled) return;
+        stderr += `\nBuild command timed out after ${options.timeoutMs}ms`;
+        (options.killTree ?? killProcessTree)(child, options.platform);
+        // Killing the tree normally delivers `close` promptly, but a
+        // descendant that keeps an inherited pipe open must not hold the
+        // synchronization operation forever: settle after a bounded grace.
+        forceTimer = setTimeout(
+          () => finish({ exitCode: null, stdout, stderr, error: spawnError }),
+          FORCE_SETTLE_MS,
+        );
+      }, options.timeoutMs);
+    }
     child.stdout?.on("data", (chunk) => {
       stdout = `${stdout}${chunk}`.slice(-OUTPUT_LIMIT);
     });
@@ -122,9 +174,7 @@ function runCommand(directory, command, options) {
       spawnError = err;
     });
     child.once("close", (exitCode) => {
-      settled = true;
-      if (timer) clearTimeout(timer);
-      resolve({ exitCode, stdout, stderr, error: spawnError });
+      finish({ exitCode, stdout, stderr, error: spawnError });
     });
   });
 }
@@ -136,6 +186,7 @@ export async function runPluginBuildCommands(directory, commands, options = {}) 
       platform: options.platform ?? process.platform,
       env: options.env,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      killTree: options.killTree,
     });
     if (result.error)
       throw new Error(
@@ -143,7 +194,7 @@ export async function runPluginBuildCommands(directory, commands, options = {}) 
       );
     if (result.exitCode !== 0)
       throw new Error(
-        `Plugin build command failed (exit ${result.exitCode ?? "unknown"}): ${formatCommand(command)}${formatOutput(result)}`,
+        `Plugin build command failed (exit ${result.exitCode ?? "unknown"}): ${formatCommand(command)}${formatOutput(result)}${BUILD_FAILURE_HINT}`,
       );
   }
 }

@@ -173,3 +173,26 @@ test("prepareBundleDirectory is a no-op without build commands", async (t) => {
   await writeFile(path.join(dir, "paseo-plugin.json"), JSON.stringify({ id: "x" }));
   assert.equal(await prepareBundleDirectory(dir), 0);
 });
+
+test("a timed-out build command rejects promptly even while a grandchild holds the pipe", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "prepare-"));
+  // The command spawns a grandchild that inherits stdout and outlives the
+  // timeout; waiting only for the immediate child's `close` would block until
+  // the grandchild exits (Codex P2).
+  const script =
+    'const { spawn } = require("child_process");' +
+    'spawn(process.execPath, ["-e", "setTimeout(() => {}, 8000)"], { stdio: ["ignore", 1, 2] });' +
+    'setTimeout(() => {}, 8000);';
+  const started = Date.now();
+  await assert.rejects(
+    runPluginBuildCommands(dir, [[process.execPath, "-e", script]], {
+      timeoutMs: 400,
+    }),
+    /timed out/,
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(
+    elapsed < 4000,
+    `timeout rejection should be bounded by the tree kill, took ${elapsed}ms`,
+  );
+});
