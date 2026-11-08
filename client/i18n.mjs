@@ -13,6 +13,8 @@ const english = {
     "Skipped {plugin}: the install source is not identifiable from the backup or on this host; the restore leaves the plugin untouched.",
   "跳过 {plugin}：注册表安装插件不支持直接切换固定版本（本机 {head}，云端 {revision}），本次保留本机版本。":
     "Skipped {plugin}: registry-installed plugins do not support in-place version pinning (host {head}, cloud {revision}); keeping host version.",
+  "跳过 {plugin}：本机版本与云端源码补丁绑定的版本不一致（本机 {revision}，补丁 {patchRevision}），本次不发布它的变更。":
+    "Skipped {plugin}: the installed revision differs from the one the recorded cloud source patch is bound to (host {revision}, patch {patchRevision}); its changes are not published this time.",
   "如需完全对齐 {plugin}，可点按「卸载重装注册表插件对齐（重新预览）」，用云端固定版本卸载并重装该插件。":
     "To fully align {plugin}, tap “Reinstall registry plugins to align (re-preview)” to uninstall and reinstall the plugin at the pinned cloud version.",
   "卸载重装注册表插件对齐（重新预览）":

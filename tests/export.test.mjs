@@ -112,6 +112,98 @@ test("export keeps previously published entry for an untracked plugin", async ()
   assert.equal(manifest.plugins.length, 1);
   assert.equal(manifest.plugins[0].id, "better-paseo");
 });
+const revisionPatchDoc = {
+  schemaVersion: 1,
+  plugin: "github-board",
+  revision: "0.10.2",
+  files: [
+    {
+      path: "index.js",
+      beforeSha256: "a".repeat(64),
+      afterSha256: "b".repeat(64),
+      find: "icons: false",
+      replace: "icons: true",
+      count: 1,
+    },
+  ],
+};
+test("export keeps the published patch entry and skips the plugin when the local revision differs", async () => {
+  const ctx = await fixture();
+  await writeJson(
+    path.join(ctx.root, "patches/github-board-0.10.2-icons.json"),
+    revisionPatchDoc,
+  );
+  await writeJson(path.join(ctx.root, "profile.json"), {
+    schemaVersion: 1,
+    plugins: [
+      {
+        id: "github-board",
+        source: "npm:@gpambrozio/paseo-github-board",
+        revision: "0.10.2",
+        enabled: true,
+      },
+    ],
+    settings: [],
+    patches: [
+      { plugin: "github-board", file: "patches/github-board-0.10.2-icons.json" },
+    ],
+  });
+  ctx.rows.push({
+    id: "github-board",
+    enabled: true,
+    status: "running",
+    installation: {
+      identity: { kind: "npm", packageName: "@gpambrozio/paseo-github-board" },
+      currentRevision: "0.11.0",
+    },
+  });
+  const result = await exportProfile(ctx);
+  assert.deepEqual(result.skipped, [
+    {
+      plugin: "github-board",
+      reason: "patch-revision-mismatch",
+      revision: "0.11.0",
+      patchRevision: "0.10.2",
+      published: true,
+    },
+  ]);
+  const { loadProfile } = await import("../server/core/profile.mjs");
+  const loaded = await loadProfile(ctx.root);
+  const entry = loaded.manifest.plugins.find((p) => p.id === "github-board");
+  assert.ok(entry);
+  assert.equal(entry.revision, "0.10.2");
+  assert.equal(loaded.manifest.patches.length, 1);
+});
+test("export skips a bootstrap patch whose revision differs from the local plugin", async () => {
+  const ctx = await fixture();
+  await writeJson(
+    path.join(ctx.root, "patches/github-board-0.10.2-icons.json"),
+    revisionPatchDoc,
+  );
+  ctx.rows.push({
+    id: "github-board",
+    enabled: true,
+    status: "running",
+    installation: {
+      identity: { kind: "npm", packageName: "@gpambrozio/paseo-github-board" },
+      currentRevision: "0.11.0",
+    },
+  });
+  const result = await exportProfile(ctx);
+  assert.deepEqual(result.skipped, [
+    {
+      plugin: "github-board",
+      reason: "patch-revision-mismatch",
+      revision: "0.11.0",
+      patchRevision: "0.10.2",
+    },
+  ]);
+  const manifest = JSON.parse(
+    await readFile(path.join(ctx.root, "profile.json"), "utf8"),
+  );
+  assert.deepEqual(manifest.plugins.map((p) => p.id), ["better-paseo"]);
+  assert.deepEqual(manifest.patches, []);
+});
 test("export packages a valid directory plugin into a bundle archive instead of skipping", async () => {
   const ctx = await fixture();
   const pluginDir = path.join(ctx.home, "flowly-checkout");
