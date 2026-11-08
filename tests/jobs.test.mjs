@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readdir, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as jobs from "../server/jobs.mjs";
@@ -69,4 +69,43 @@ test("restart marks dead-owner jobs interrupted and unlocking never removes a li
   await m.unlock();
   await m.start("probe", async () => new Promise(() => {}));
   await assert.rejects(m.unlock(), /alive/i);
+});
+test("a finished job releases its lock before the terminal status is observable", async () => {
+  const state = await mkdtemp(path.join(tmpdir(), "paseo-jobs-"));
+  const lock = path.join(await realpath(state), "job.lock");
+  const m = new jobs.JobManager(state);
+  // Saturate the fs thread pool like a loaded CI runner so an in-flight lock
+  // cleanup cannot sneak through between the terminal write and our check.
+  let stop = false;
+  const hammer = Promise.all(
+    Array.from({ length: 4 }, () =>
+      (async () => {
+        while (!stop) await readdir(state).catch(() => {});
+      })(),
+    ),
+  );
+  try {
+    for (let round = 0; round < 25; round++) {
+      const j = await m.start("probe", async () => "ok");
+      let v;
+      while (
+        !(v = await m.get(j.id)) ||
+        !["succeeded", "failed"].includes(v.status)
+      )
+        await new Promise((r) => setImmediate(r));
+      const lockLeft = await stat(lock).then(
+        () => true,
+        () => false,
+      );
+      assert.equal(
+        lockLeft,
+        false,
+        `round ${round}: ${v.status} visible while job.lock still exists`,
+      );
+      assert.equal(v.status, "succeeded");
+    }
+  } finally {
+    stop = true;
+    await hammer;
+  }
 });
